@@ -639,6 +639,18 @@ def _normalize_command_for_detection(command: str) -> str:
     # pattern snapshot) so it tracks the live HERMES_HOME even when that is set
     # after this module is imported — as the hermetic test conftest does.
     command = _rewrite_resolved_hermes_home(command)
+    # Collapse $IFS / ${IFS} word-separator expansions to a literal space.
+    # In any POSIX shell the IFS variable defaults to <space><tab><newline>,
+    # so `rm${IFS}-rf${IFS}/` is executed as `rm -rf /`. Because the dangerous
+    # and hardline patterns anchor on literal whitespace (\s) between a command
+    # and its arguments, leaving the unexpanded `${IFS}` token in place lets an
+    # attacker slip past EVERY pattern — including the unconditional hardline
+    # floor (rm -rf /, mkfs, dd to raw device, shutdown/reboot). Substituting a
+    # space here mirrors the shell's own expansion so the patterns fire. The
+    # brace form also covers bash substring expansions like `${IFS:0:1}` (a
+    # single space). Same de-obfuscation class as the backslash/empty-quote
+    # handling above.
+    command = re.sub(r'\$\{IFS\b[^}]*\}|\$IFS\b', ' ', command)
     return command
 
 
