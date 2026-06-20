@@ -48,6 +48,58 @@ logger = logging.getLogger("gateway.run")
 class GatewaySlashCommandsMixin:
     """In-session slash-command handlers for GatewayRunner."""
 
+    def _lite_commands_config(self) -> dict[str, Any] | None:
+        """Return config when HermesLite command surfaces are enabled."""
+        try:
+            from gateway.run import _load_gateway_config
+            cfg = _load_gateway_config()
+        except Exception:
+            return None
+        if not isinstance(cfg, dict):
+            return None
+        gateway_cfg = cfg.get("gateway", {})
+        if not isinstance(gateway_cfg, dict):
+            return None
+        if is_truthy_value(gateway_cfg.get("lite_commands"), default=False):
+            return cfg
+        return None
+
+    @staticmethod
+    def _lite_model_config_lines(cfg: dict[str, Any]) -> list[str]:
+        model_cfg = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
+        model = str(model_cfg.get("default") or model_cfg.get("model") or "unset")
+        provider = str(model_cfg.get("provider") or "unknown")
+        base_url = str(model_cfg.get("base_url") or "").strip()
+        lines = [
+            f"Model: `{model}`",
+            f"Provider: `{provider}`",
+        ]
+        if base_url:
+            lines.append(f"Endpoint: `{base_url}`")
+        return lines
+
+    @staticmethod
+    def _lite_disabled_toolsets(cfg: dict[str, Any]) -> str:
+        agent_cfg = cfg.get("agent", {}) if isinstance(cfg.get("agent"), dict) else {}
+        disabled = agent_cfg.get("disabled_toolsets") or []
+        if not isinstance(disabled, list):
+            return "none"
+        clean = [str(item) for item in disabled if str(item).strip()]
+        return ", ".join(clean) if clean else "none"
+
+    @staticmethod
+    def _lite_process_rss() -> str:
+        try:
+            with open("/proc/self/status", encoding="utf-8") as f:
+                for line in f:
+                    if line.startswith("VmRSS:"):
+                        parts = line.split()
+                        if len(parts) >= 2:
+                            return f"{int(parts[1]) / 1024:.1f} MB"
+        except Exception:
+            pass
+        return "unknown"
+
     def _typed_command_prefix_for(self, platform) -> str:
         """Return the prefix users can always type to reach Hermes commands.
 
@@ -59,7 +111,8 @@ class GatewaySlashCommandsMixin:
         that actually works when typed.
         """
         adapter = self.adapters.get(platform) if getattr(self, "adapters", None) else None
-        return getattr(adapter, "typed_command_prefix", "/") if adapter is not None else "/"
+        prefix = getattr(adapter, "typed_command_prefix", "/") if adapter is not None else "/"
+        return prefix if isinstance(prefix, str) and prefix else "/"
 
     async def _handle_reset_command(self, event: MessageEvent) -> Union[str, EphemeralReply]:
         """Handle /new or /reset command."""
@@ -395,6 +448,22 @@ class GatewaySlashCommandsMixin:
     async def _handle_status_command(self, event: MessageEvent) -> str:
         """Handle /status command."""
         from gateway.run import _AGENT_PENDING_SENTINEL, _load_gateway_config, _resolve_gateway_model
+
+        lite_cfg = self._lite_commands_config()
+        if lite_cfg is not None:
+            gateway_cfg = lite_cfg.get("gateway", {}) if isinstance(lite_cfg.get("gateway"), dict) else {}
+            service_name = str(gateway_cfg.get("service_name") or "hermes-lite.service")
+            connected_platforms = [p.value for p in self.adapters.keys()]
+            lines = [
+                "HermesLite status",
+                f"Service: `{service_name}` (gateway process running)",
+                f"PID: `{os.getpid()}`",
+                f"RSS: {self._lite_process_rss()}",
+                *self._lite_model_config_lines(lite_cfg),
+                f"Disabled toolsets: {self._lite_disabled_toolsets(lite_cfg)}",
+                f"Platforms: {', '.join(connected_platforms) if connected_platforms else 'none'}",
+            ]
+            return "\n".join(lines)
 
         source = event.source
         session_entry = self.session_store.get_or_create_session(source)
@@ -951,6 +1020,30 @@ class GatewaySlashCommandsMixin:
         """Handle /help command - list available commands."""
         from gateway.run import _telegramize_command_mentions
         from hermes_cli.commands import gateway_help_lines
+
+        lite_cfg = self._lite_commands_config()
+        if lite_cfg is not None:
+            prefix = self._typed_command_prefix_for(getattr(event.source, "platform", None))
+            items = [
+                ("status", "show HermesLite service/model/resource status"),
+                ("help", "show this compact command list"),
+                ("new", "start a fresh session"),
+                ("stop", "stop the running turn"),
+                ("model", "show current model; pass a model name to switch intentionally"),
+                ("goal", "set, inspect, pause, resume, or clear the standing goal"),
+                ("usage", "show token usage for this session"),
+                ("memory", "review memory approval/status"),
+                ("version", "show Hermes version"),
+            ]
+            lines = ["HermesLite commands"]
+            lines.extend(f"`{prefix}{name}` - {desc}" for name, desc in items)
+            lines.append("")
+            lines.append("Hidden: browser, image generation, TTS, computer-use, and broad admin surfaces.")
+            return _telegramize_command_mentions(
+                "\n".join(lines),
+                getattr(getattr(event, "source", None), "platform", None),
+            )
+
         lines = [
             t("gateway.help.header"),
             *gateway_help_lines(),
@@ -1052,6 +1145,17 @@ class GatewaySlashCommandsMixin:
 
         # Parse --provider, --global, and --refresh flags
         model_input, explicit_provider, persist_global, force_refresh = parse_model_flags(raw_args)
+
+        lite_cfg = self._lite_commands_config()
+        if lite_cfg is not None and not model_input and not explicit_provider and not force_refresh:
+            lines = [
+                "HermesLite model",
+                *self._lite_model_config_lines(lite_cfg),
+                "",
+                "Use `/model <model-name>` only when you intentionally want a session-level switch.",
+                "Use `/model <model-name> --global` only after validating it on this VPS.",
+            ]
+            return "\n".join(lines)
 
         # --refresh: bust the disk cache so the picker shows live data.
         if force_refresh:
