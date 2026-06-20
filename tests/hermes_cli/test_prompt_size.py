@@ -6,6 +6,7 @@ import pytest
 
 from hermes_cli.prompt_size import (
     _SKILLS_BLOCK_RE,
+    _build_inspection_agent,
     compute_prompt_breakdown,
     render_breakdown,
 )
@@ -68,6 +69,40 @@ def test_runs_offline_without_credentials(isolated_home, monkeypatch):
         monkeypatch.delenv(var, raising=False)
     data = compute_prompt_breakdown("cli")
     assert data["system_prompt"]["bytes"] > 0
+
+
+def test_inspection_agent_uses_configured_platform_toolsets(isolated_home, monkeypatch):
+    """Prompt-size inspection should not build schemas for disabled toolsets."""
+    (isolated_home / "config.yaml").write_text(
+        """
+model:
+  default: test-model
+platform_toolsets:
+  feishu:
+    - terminal
+    - browser
+    - web
+agent:
+  disabled_toolsets:
+    - browser
+""".lstrip(),
+        encoding="utf-8",
+    )
+
+    captured = {}
+
+    class FakeAgent:
+        def __init__(self, **kwargs):
+            captured.update(kwargs)
+
+    monkeypatch.setattr("run_agent.AIAgent", FakeAgent)
+
+    _build_inspection_agent("feishu")
+
+    assert captured["model"] == "test-model"
+    assert "browser" not in captured["enabled_toolsets"]
+    assert {"terminal", "web"}.issubset(captured["enabled_toolsets"])
+    assert captured["disabled_toolsets"] == ["browser"]
 
 
 def test_skills_index_reflects_installed_skills(isolated_home):
