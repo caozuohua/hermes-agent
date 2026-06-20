@@ -721,10 +721,9 @@ class MemoryManager:
             try:
                 provider.on_session_end(messages)
             except Exception as e:
-                logger.warning(
+                logger.debug(
                     "Memory provider '%s' on_session_end failed: %s",
                     provider.name, e,
-                    exc_info=True,
                 )
 
     def on_session_switch(

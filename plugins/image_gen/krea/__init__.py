@@ -33,7 +33,6 @@ from agent.image_gen_provider import (
     DEFAULT_ASPECT_RATIO,
     ImageGenProvider,
     error_response,
-    normalize_reference_images,
     resolve_aspect_ratio,
     save_url_image,
     success_response,
@@ -192,7 +191,7 @@ class KreaImageGenProvider(ImageGenProvider):
         return {
             "name": "Krea",
             "badge": "paid",
-            "tag": "Krea 2 foundation model — Medium ($0.03) + Large ($0.06). Style transfer, moodboards, reference-guided generation.",
+            "tag": "Krea 2 foundation model — Medium ($0.03) + Large ($0.06). Strong style transfer + moodboards.",
             "env_vars": [
                 {
                     "key": "KREA_API_KEY",
@@ -202,11 +201,6 @@ class KreaImageGenProvider(ImageGenProvider):
             ],
         }
 
-    def capabilities(self) -> Dict[str, Any]:
-        # Krea supports reference-guided generation (image-to-image style
-        # transfer) via image_style_references — up to 10 refs.
-        return {"modalities": ["text", "image"], "max_reference_images": 10}
-
     # ------------------------------------------------------------------
     # generate()
     # ------------------------------------------------------------------
@@ -215,47 +209,11 @@ class KreaImageGenProvider(ImageGenProvider):
         self,
         prompt: str,
         aspect_ratio: str = DEFAULT_ASPECT_RATIO,
-        *,
-        image_url: Optional[str] = None,
-        reference_image_urls: Optional[List[str]] = None,
         **kwargs: Any,
     ) -> Dict[str, Any]:
         prompt = (prompt or "").strip()
         aspect = resolve_aspect_ratio(aspect_ratio)
         krea_ar = _ASPECT_MAP.get(aspect, "1:1")
-
-        # Collect reference images for reference-guided generation (image-to-
-        # image style transfer). Sources, in order:
-        #   1. unified image_url (primary source) + reference_image_urls (strings)
-        #   2. legacy image_style_references kwarg — may be plain URL strings OR
-        #      Krea's richer ref objects (e.g. {"url": ..., "strength": ...}),
-        #      which are passed through verbatim for backward compatibility.
-        style_refs: List[Any] = []
-        if isinstance(image_url, str) and image_url.strip():
-            style_refs.append(image_url.strip())
-        for ref in (normalize_reference_images(reference_image_urls) or []):
-            style_refs.append(ref)
-        legacy_refs = kwargs.get("image_style_references")
-        if isinstance(legacy_refs, list):
-            for ref in legacy_refs:
-                if isinstance(ref, str):
-                    if ref.strip():
-                        style_refs.append(ref.strip())
-                elif ref:
-                    # Non-string ref object (dict, etc.) — pass through as-is.
-                    style_refs.append(ref)
-        # Dedupe string entries while preserving order (dict refs aren't
-        # hashable, so they're kept verbatim); Krea caps at 10.
-        seen: set = set()
-        deduped: List[Any] = []
-        for r in style_refs:
-            if isinstance(r, str):
-                if r in seen:
-                    continue
-                seen.add(r)
-            deduped.append(r)
-        style_refs = deduped[:10]
-        modality = "image" if style_refs else "text"
 
         if not prompt:
             return error_response(
@@ -298,10 +256,10 @@ class KreaImageGenProvider(ImageGenProvider):
         if isinstance(styles, list) and styles:
             payload["styles"] = styles
 
-        if style_refs:
-            # Reference-guided generation (image-to-image style transfer).
-            # Krea caps at 10 refs per request (already clamped above).
-            payload["image_style_references"] = style_refs
+        image_style_references = kwargs.get("image_style_references")
+        if isinstance(image_style_references, list) and image_style_references:
+            # Krea caps at 10 refs per request.
+            payload["image_style_references"] = image_style_references[:10]
 
         moodboards = kwargs.get("moodboards")
         if isinstance(moodboards, list) and moodboards:
@@ -525,19 +483,19 @@ class KreaImageGenProvider(ImageGenProvider):
         # Per Krea's job-lifecycle docs the completed payload exposes
         # ``result.urls`` (an array). Fall back to a single ``url`` field
         # for forward/backward compatibility.
-        result_image_url: Optional[str] = None
+        image_url: Optional[str] = None
         urls = result.get("urls")
         if isinstance(urls, list) and urls:
             for candidate in urls:
                 if isinstance(candidate, str) and candidate.strip():
-                    result_image_url = candidate.strip()
+                    image_url = candidate.strip()
                     break
-        if result_image_url is None:
+        if image_url is None:
             single = result.get("url")
             if isinstance(single, str) and single.strip():
-                result_image_url = single.strip()
+                image_url = single.strip()
 
-        if result_image_url is None:
+        if image_url is None:
             return error_response(
                 error="Krea result contained no image URL",
                 error_type="empty_response",
@@ -550,14 +508,14 @@ class KreaImageGenProvider(ImageGenProvider):
         # Materialise locally — Krea result URLs may expire, mirroring
         # what we do for xAI / OpenAI URL responses (#26942).
         try:
-            saved_path = save_url_image(result_image_url, prefix=f"krea_{model_id}")
+            saved_path = save_url_image(image_url, prefix=f"krea_{model_id}")
         except Exception as exc:  # noqa: BLE001
             logger.warning(
                 "Krea image URL %s could not be cached (%s); falling back to bare URL.",
-                result_image_url,
+                image_url,
                 exc,
             )
-            image_ref = result_image_url
+            image_ref = image_url
         else:
             image_ref = str(saved_path)
 
@@ -576,7 +534,6 @@ class KreaImageGenProvider(ImageGenProvider):
             prompt=prompt,
             aspect_ratio=aspect,
             provider="krea",
-            modality=modality,
             extra=extra,
         )
 
