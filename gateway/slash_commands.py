@@ -23,6 +23,7 @@ import logging
 import os
 import re
 import shlex
+import shutil
 import sys
 import time
 from datetime import datetime
@@ -99,6 +100,55 @@ class GatewaySlashCommandsMixin:
         except Exception:
             pass
         return "unknown"
+
+    @staticmethod
+    def _lite_format_bytes(value: int | float) -> str:
+        try:
+            size = float(value)
+        except (TypeError, ValueError):
+            return "unknown"
+        units = ("B", "KB", "MB", "GB", "TB")
+        for unit in units:
+            if abs(size) < 1024 or unit == units[-1]:
+                return f"{size:.1f} {unit}" if unit != "B" else f"{size:.0f} B"
+            size /= 1024
+        return "unknown"
+
+    @classmethod
+    def _lite_host_memory(cls) -> str:
+        try:
+            mem: dict[str, int] = {}
+            with open("/proc/meminfo", encoding="utf-8") as f:
+                for line in f:
+                    name, _, rest = line.partition(":")
+                    parts = rest.split()
+                    if parts:
+                        mem[name] = int(parts[0]) * 1024
+            total = mem.get("MemTotal")
+            available = mem.get("MemAvailable")
+            if total and available is not None:
+                used = max(total - available, 0)
+                return (
+                    f"{cls._lite_format_bytes(used)} used / "
+                    f"{cls._lite_format_bytes(total)} total "
+                    f"({cls._lite_format_bytes(available)} available)"
+                )
+        except Exception:
+            pass
+        return "unknown"
+
+    @classmethod
+    def _lite_disk_usage(cls, path: str = "/") -> str:
+        try:
+            usage = shutil.disk_usage(path)
+            used = usage.total - usage.free
+            return (
+                f"{cls._lite_format_bytes(used)} used / "
+                f"{cls._lite_format_bytes(usage.total)} total "
+                f"({cls._lite_format_bytes(usage.free)} free)"
+            )
+        except Exception:
+            return "unknown"
 
     def _typed_command_prefix_for(self, platform) -> str:
         """Return the prefix users can always type to reach Hermes commands.
@@ -459,8 +509,9 @@ class GatewaySlashCommandsMixin:
                 f"Service: `{service_name}` (gateway process running)",
                 f"PID: `{os.getpid()}`",
                 f"RSS: {self._lite_process_rss()}",
+                f"Memory: {self._lite_host_memory()}",
+                f"Disk: {self._lite_disk_usage()}",
                 *self._lite_model_config_lines(lite_cfg),
-                f"Disabled toolsets: {self._lite_disabled_toolsets(lite_cfg)}",
                 f"Platforms: {', '.join(connected_platforms) if connected_platforms else 'none'}",
             ]
             return "\n".join(lines)

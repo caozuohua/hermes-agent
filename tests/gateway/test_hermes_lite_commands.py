@@ -102,7 +102,10 @@ async def test_lite_status_reports_runtime_not_session_cockpit(lite_config):
     assert "HermesLite" in result
     assert "hermes-lite.service" in result
     assert "MiniMax-M3" in result
-    assert "browser, image_gen, tts, computer_use" in result
+    assert "Memory:" in result
+    assert "Disk:" in result
+    assert "Disabled toolsets" not in result
+    assert "browser, image_gen, tts, computer_use" not in result
     assert "Session ID" not in result
     assert "Cumulative API tokens" not in result
     assert len(result) < 1000

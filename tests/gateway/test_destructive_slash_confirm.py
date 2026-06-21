@@ -78,6 +78,31 @@ def _make_runner():
 
 
 @pytest.mark.asyncio
+async def test_lite_commands_skip_destructive_confirm(monkeypatch):
+    """HermesLite keeps /new usable on platforms without slash-confirm cards."""
+    runner = _make_runner()
+    runner._read_user_config = lambda: {
+        "gateway": {"lite_commands": True},
+        "approvals": {"destructive_slash_confirm": True},
+    }
+    runner._session_key_for_source = lambda src: build_session_key(src)
+
+    sentinel = "fresh lite session"
+    execute = AsyncMock(return_value=sentinel)
+
+    result = await runner._maybe_confirm_destructive_slash(
+        event=_make_event("/new"),
+        command="new",
+        title="/new",
+        detail="Discards history.",
+        execute=execute,
+    )
+
+    execute.assert_awaited_once()
+    assert result == sentinel
+
+
+@pytest.mark.asyncio
 async def test_gate_off_runs_execute_immediately(monkeypatch):
     """When approvals.destructive_slash_confirm is False, the destructive
     action runs immediately without prompting."""

@@ -8901,7 +8901,22 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         if not history and source.platform and source.platform != Platform.LOCAL and source.platform != Platform.WEBHOOK:
             platform_name = source.platform.value
             env_key = _home_target_env_var(platform_name)
-            if not os.getenv(env_key):
+            lite_commands = False
+            try:
+                _home_notice_cfg = _load_gateway_config()
+                _home_gateway_cfg = (
+                    _home_notice_cfg.get("gateway", {})
+                    if isinstance(_home_notice_cfg, dict)
+                    else {}
+                )
+                if isinstance(_home_gateway_cfg, dict):
+                    lite_commands = is_truthy_value(
+                        _home_gateway_cfg.get("lite_commands"),
+                        default=False,
+                    )
+            except Exception:
+                lite_commands = False
+            if not lite_commands and not os.getenv(env_key):
                 # Slack dispatches all Hermes commands through a single
                 # parent slash command `/hermes`; bare `/sethome` is not
                 # registered and would fail with "app did not respond".
@@ -11368,6 +11383,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         confirm_required = True
         try:
             cfg = self._read_user_config()
+            gateway_cfg = cfg.get("gateway") if isinstance(cfg, dict) else None
+            if isinstance(gateway_cfg, dict) and is_truthy_value(
+                gateway_cfg.get("lite_commands"), default=False,
+            ):
+                return await execute()
             approvals = cfg.get("approvals") if isinstance(cfg, dict) else None
             if isinstance(approvals, dict):
                 confirm_required = bool(approvals.get("destructive_slash_confirm", True))
