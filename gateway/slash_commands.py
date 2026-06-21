@@ -150,6 +150,51 @@ class GatewaySlashCommandsMixin:
         except Exception:
             return "unknown"
 
+    def _lite_usage_text(self, source: SessionSource, agent: Any | None) -> str:
+        if agent and hasattr(agent, "session_total_tokens") and getattr(agent, "session_api_calls", 0) > 0:
+            input_tokens = getattr(agent, "session_input_tokens", 0) or 0
+            output_tokens = getattr(agent, "session_output_tokens", 0) or 0
+            cache_read = getattr(agent, "session_cache_read_tokens", 0) or 0
+            cache_write = getattr(agent, "session_cache_write_tokens", 0) or 0
+            lines = [
+                "HermesLite usage",
+                f"Model: `{getattr(agent, 'model', 'unknown')}`",
+                f"Input tokens: {input_tokens:,}",
+            ]
+            if cache_read:
+                lines.append(f"Cache read: {cache_read:,}")
+            if cache_write:
+                lines.append(f"Cache write: {cache_write:,}")
+            lines.extend([
+                f"Output tokens: {output_tokens:,}",
+                f"Total tokens: {getattr(agent, 'session_total_tokens', 0):,}",
+                f"API calls: {getattr(agent, 'session_api_calls', 0)}",
+            ])
+            return "\n".join(lines)
+
+        try:
+            session_entry = self.session_store.get_or_create_session(source)
+            history = self.session_store.load_transcript(session_entry.session_id)
+        except Exception:
+            history = []
+        if history:
+            try:
+                from agent.model_metadata import estimate_messages_tokens_rough
+                msgs = [
+                    m for m in history
+                    if m.get("role") in {"user", "assistant"} and m.get("content")
+                ]
+                approx = estimate_messages_tokens_rough(msgs)
+                return "\n".join([
+                    "HermesLite usage",
+                    f"Messages: {len(msgs)}",
+                    f"Estimated context: ~{approx:,} tokens",
+                    "Detailed token usage appears after the next model call.",
+                ])
+            except Exception:
+                pass
+        return "HermesLite usage\nNo usage data yet."
+
     def _typed_command_prefix_for(self, platform) -> str:
         """Return the prefix users can always type to reach Hermes commands.
 
@@ -264,12 +309,19 @@ class GatewaySlashCommandsMixin:
         except Exception:
             session_info = ""
 
+        lite_cfg = self._lite_commands_config()
         if new_entry:
-            header = self._telegram_topic_new_header(source) or t("gateway.reset.header_default")
+            header = (
+                self._telegram_topic_new_header(source)
+                or ("HermesLite session reset" if lite_cfg is not None else t("gateway.reset.header_default"))
+            )
         else:
             # No existing session, just create one
             new_entry = self.session_store.get_or_create_session(source, force_new=True)
-            header = self._telegram_topic_new_header(source) or t("gateway.reset.header_new")
+            header = (
+                self._telegram_topic_new_header(source)
+                or ("HermesLite new session" if lite_cfg is not None else t("gateway.reset.header_new"))
+            )
 
         # Set session title if provided with /new <title>
         _title_arg = event.get_command_args().strip()
@@ -320,12 +372,17 @@ class GatewaySlashCommandsMixin:
         except Exception:
             pass
 
-        # Append a random tip to the reset message
-        try:
-            from hermes_cli.tips import get_random_tip
-            _tip_line = t("gateway.reset.tip", tip=get_random_tip())
-        except Exception:
+        # Append a random tip to full Hermes reset messages. HermesLite keeps
+        # /new compact and avoids surfacing raw i18n keys when locale assets are
+        # absent from a trimmed deployment.
+        if lite_cfg is not None:
             _tip_line = ""
+        else:
+            try:
+                from hermes_cli.tips import get_random_tip
+                _tip_line = t("gateway.reset.tip", tip=get_random_tip())
+            except Exception:
+                _tip_line = ""
 
         if session_info:
             return EphemeralReply(f"{header}\n\n{session_info}{_tip_line}")
@@ -3294,6 +3351,12 @@ class GatewaySlashCommandsMixin:
                     cached = _cache.get(session_key)
                     if cached:
                         agent = cached[0]
+
+        if self._lite_commands_config() is not None:
+            return self._lite_usage_text(
+                source,
+                agent if agent is not _AGENT_PENDING_SENTINEL else None,
+            )
 
         # Resolve provider/base_url/api_key for the account-usage fetch.
         # Prefer the live agent; fall back to persisted billing data on the

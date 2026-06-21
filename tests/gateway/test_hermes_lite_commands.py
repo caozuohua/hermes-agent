@@ -1,6 +1,7 @@
 """HermesLite gateway slash command rendering."""
 
 from datetime import datetime
+import threading
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
@@ -109,3 +110,71 @@ async def test_lite_status_reports_runtime_not_session_cockpit(lite_config):
     assert "Session ID" not in result
     assert "Cumulative API tokens" not in result
     assert len(result) < 1000
+
+
+@pytest.mark.asyncio
+async def test_lite_usage_uses_plain_labels_not_i18n_keys(lite_config):
+    runner = _runner()
+    agent = MagicMock()
+    agent.model = "MiniMax-M3"
+    agent.session_api_calls = 2
+    agent.session_total_tokens = 1234
+    agent.session_input_tokens = 900
+    agent.session_output_tokens = 334
+    agent.session_cache_read_tokens = 0
+    agent.session_cache_write_tokens = 0
+    agent.get_rate_limit_state.return_value = None
+    agent.context_compressor = SimpleNamespace(
+        last_prompt_tokens=0,
+        context_length=1_000_000,
+        compression_count=0,
+    )
+    runner._agent_cache_lock = threading.Lock()
+    runner._agent_cache = {build_session_key(_source()): (agent, "sig")}
+
+    result = await runner._handle_usage_command(_event("/usage"))
+
+    assert "HermesLite usage" in result
+    assert "Model: `MiniMax-M3`" in result
+    assert "Input tokens: 900" in result
+    assert "Output tokens: 334" in result
+    assert "Total tokens: 1,234" in result
+    assert "API calls: 2" in result
+    assert "gateway.usage" not in result
+
+
+@pytest.mark.asyncio
+async def test_lite_new_uses_plain_header_not_i18n_keys(lite_config):
+    runner = _runner()
+    session_key = build_session_key(_source())
+    old_entry = runner.session_store.get_or_create_session.return_value
+    new_entry = SessionEntry(
+        session_key=session_key,
+        session_id="sess-2",
+        created_at=datetime.now(),
+        updated_at=datetime.now(),
+        platform=Platform.FEISHU,
+        chat_type="dm",
+        total_tokens=0,
+    )
+    runner.session_store._entries = {session_key: old_entry}
+    runner.session_store.reset_session.return_value = new_entry
+    runner._pending_messages = {}
+    runner._pending_approvals = {}
+    runner._session_model_overrides = {}
+    runner._pending_model_notes = {}
+    runner._background_tasks = set()
+    runner._format_session_info = lambda: "\n".join(
+        [
+            "◆ Model: `MiniMax-M3`",
+            "◆ Provider: custom",
+            "◆ Context: 1.0M tokens (detected)",
+        ]
+    )
+
+    result = await runner._handle_reset_command(_event("/new"))
+    text = str(result)
+
+    assert "HermesLite session reset" in text
+    assert "◆ Model: `MiniMax-M3`" in text
+    assert "gateway.reset" not in text
