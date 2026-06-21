@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import builtins
 import tempfile
 from pathlib import Path
 
@@ -129,6 +130,30 @@ def test_requester_exception_denies_and_does_not_mutate(tmp_path):
     assert "error" in result
     assert "Edit approval denied" in result["error"]
     assert target.read_text(encoding="utf-8") == "before\n"
+
+
+def test_missing_acp_adapter_does_not_block_non_acp_write(monkeypatch, tmp_path):
+    target = tmp_path / "sample.txt"
+    original_import = builtins.__import__
+
+    def fake_import(name, *args, **kwargs):
+        if name == "acp_adapter.edit_approval":
+            raise ModuleNotFoundError("No module named 'acp_adapter'", name="acp_adapter")
+        return original_import(name, *args, **kwargs)
+
+    monkeypatch.setattr(builtins, "__import__", fake_import)
+    monkeypatch.setattr(
+        "model_tools.registry.dispatch",
+        lambda *args, **kwargs: {"bytes_written": len("created\n"), "path": str(target)},
+    )
+
+    result = handle_function_call(
+        "write_file",
+        {"path": str(target), "content": "created\n"},
+        task_id="missing-acp-adapter",
+    )
+
+    assert result.get("bytes_written") == len("created\n")
 
 
 def test_patch_replace_rejection_does_not_mutate(tmp_path):

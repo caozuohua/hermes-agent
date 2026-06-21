@@ -1067,11 +1067,18 @@ def handle_function_call(
         # is bound via ContextVar only for ACP sessions, so CLI/gateway paths
         # are unaffected when it is unset.
         try:
-            from acp_adapter.edit_approval import maybe_require_edit_approval
+            try:
+                from acp_adapter.edit_approval import maybe_require_edit_approval
+            except ModuleNotFoundError as _edit_approval_import_err:
+                if str(getattr(_edit_approval_import_err, "name", "")) == "acp_adapter":
+                    maybe_require_edit_approval = None
+                else:
+                    raise
 
-            edit_block_message = maybe_require_edit_approval(function_name, function_args)
-            if edit_block_message is not None:
-                return edit_block_message
+            if maybe_require_edit_approval is not None:
+                edit_block_message = maybe_require_edit_approval(function_name, function_args)
+                if edit_block_message is not None:
+                    return edit_block_message
         except Exception as _edit_approval_err:
             logger.debug("ACP edit approval guard error: %s", _edit_approval_err)
             if function_name in {"write_file", "patch"}:
