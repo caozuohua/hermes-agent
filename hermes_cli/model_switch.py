@@ -925,9 +925,10 @@ def switch_model(
         # block named "openai"), so it would re-resolve from scratch and fail
         # or hop to an aggregator. Use the pdef's endpoint directly instead.
         _user_pdef = None
-        if explicit_provider and user_providers:
+        if user_providers:
             from hermes_cli.providers import resolve_user_provider as _ruser
-            _user_pdef = _ruser(explicit_provider.strip().lower(), user_providers)
+            if explicit_provider:
+                _user_pdef = _ruser(explicit_provider.strip().lower(), user_providers)
             if _user_pdef is None:
                 _user_pdef = _ruser(target_provider, user_providers)
         if _user_pdef is not None and _user_pdef.base_url:
