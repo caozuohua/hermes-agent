@@ -182,6 +182,37 @@ class TestIsAvailable:
         monkeypatch.setenv("TAVILY_API_KEY", "real")
         assert p.is_available() is True
 
+    def test_tavily_search_plan_uses_basic_for_simple_queries(self) -> None:
+        from plugins.web.tavily.provider import TavilyWebSearchProvider
+
+        plan = TavilyWebSearchProvider._search_plan("capital of Brazil", 5)
+
+        assert plan["search_depth"] == "basic"
+        assert plan["max_results"] == 3
+        assert plan["include_answer"] == "basic"
+        assert "topic" not in plan
+
+    def test_tavily_search_plan_uses_news_topic_for_fresh_queries(self) -> None:
+        from plugins.web.tavily.provider import TavilyWebSearchProvider
+
+        plan = TavilyWebSearchProvider._search_plan("latest AI news today", 5)
+
+        assert plan["search_depth"] == "basic"
+        assert plan["topic"] == "news"
+        assert plan["days"] == 7
+        assert plan["max_results"] == 5
+
+    def test_tavily_search_plan_uses_advanced_for_deep_queries(self) -> None:
+        from plugins.web.tavily.provider import TavilyWebSearchProvider
+
+        plan = TavilyWebSearchProvider._search_plan(
+            "compare OpenRouter vs NewAPI in detail", 5
+        )
+
+        assert plan["search_depth"] == "advanced"
+        assert plan["max_results"] == 5
+        assert plan["include_answer"] is False
+
     def test_exa_requires_api_key(self, monkeypatch: pytest.MonkeyPatch) -> None:
         _ensure_plugins_loaded()
         from agent.web_search_registry import get_provider

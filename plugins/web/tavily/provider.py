@@ -25,6 +25,7 @@ from __future__ import annotations
 
 import logging
 import os
+import re
 from typing import Any, Dict, List
 
 from agent.web_search_provider import WebSearchProvider
@@ -146,6 +147,57 @@ class TavilyWebSearchProvider(WebSearchProvider):
     def supports_extract(self) -> bool:
         return True
 
+    @staticmethod
+    def _search_plan(query: str, limit: int) -> Dict[str, Any]:
+        """Choose a cost-aware Tavily plan without exposing more tool schema.
+
+        Default to cheap/basic searches with fewer snippets. Escalate only
+        when the query itself asks for freshness or deeper comparison.
+        """
+        q = (query or "").strip()
+        q_lower = q.lower()
+        wants_news = bool(
+            re.search(
+                r"\b(today|yesterday|latest|recent|breaking|news|this week|"
+                r"last week|202[5-9]|current)\b",
+                q_lower,
+            )
+            or any(term in q for term in ("今天", "昨天", "最新", "最近", "新闻", "实时", "本周", "本月"))
+        )
+        wants_depth = bool(
+            re.search(
+                r"\b(compare|comparison|versus|vs\.?|benchmark|deep dive|"
+                r"analysis|tradeoff|survey|review|why|how)\b",
+                q_lower,
+            )
+            or any(term in q for term in ("对比", "比较", "深入", "详细", "分析", "综述", "论文", "评测", "为什么", "如何"))
+        )
+
+        if wants_depth:
+            depth = "advanced"
+            max_results = min(max(limit, 3), 5)
+            include_answer: Any = False
+        elif wants_news:
+            depth = "basic"
+            max_results = min(max(limit, 3), 5)
+            include_answer = "basic"
+        else:
+            depth = "basic"
+            max_results = min(max(limit, 1), 3)
+            include_answer = "basic"
+
+        plan: Dict[str, Any] = {
+            "search_depth": depth,
+            "max_results": max_results,
+            "include_answer": include_answer,
+            "include_raw_content": False,
+            "include_images": False,
+        }
+        if wants_news:
+            plan["topic"] = "news"
+            plan["days"] = 7
+        return plan
+
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
         """Execute a Tavily search."""
         try:
@@ -154,17 +206,26 @@ class TavilyWebSearchProvider(WebSearchProvider):
             if is_interrupted():
                 return {"success": False, "error": "Interrupted"}
 
-            logger.info("Tavily search: '%s' (limit=%d)", query, limit)
-            raw = _tavily_request(
-                "search",
-                {
-                    "query": query,
-                    "max_results": min(limit, 20),
-                    "include_raw_content": False,
-                    "include_images": False,
-                },
+            plan = self._search_plan(query, limit)
+            logger.info(
+                "Tavily search: '%s' (depth=%s, topic=%s, limit=%d)",
+                query,
+                plan.get("search_depth"),
+                plan.get("topic", "general"),
+                plan.get("max_results"),
             )
-            return _normalize_tavily_search_results(raw)
+            raw = _tavily_request("search", {"query": query, **plan})
+            normalized = _normalize_tavily_search_results(raw)
+            if raw.get("answer"):
+                normalized.setdefault("data", {})["answer"] = raw.get("answer")
+            normalized.setdefault("data", {})["strategy"] = {
+                "backend": "tavily",
+                "search_depth": plan.get("search_depth"),
+                "topic": plan.get("topic", "general"),
+                "days": plan.get("days"),
+                "max_results": plan.get("max_results"),
+            }
+            return normalized
         except ValueError as exc:
             return {"success": False, "error": str(exc)}
         except Exception as exc:  # noqa: BLE001 — including httpx errors
