@@ -1023,6 +1023,7 @@ DEFAULT_CONFIG = {
     "web": {
         "backend": "",           # shared fallback — applies to both search and extract
         "search_backend": "",    # per-capability override for web_search (e.g. "searxng")
+        "search_fallback_backends": ["brave-free", "ddgs"],  # retry web_search on failure/empty results
         "extract_backend": "",   # per-capability override for web_extract (e.g. "native")
     },
 

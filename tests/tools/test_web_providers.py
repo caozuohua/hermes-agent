@@ -216,10 +216,12 @@ class TestDefaultConfig:
         web = DEFAULT_CONFIG["web"]
         assert "backend" in web
         assert "search_backend" in web
+        assert "search_fallback_backends" in web
         assert "extract_backend" in web
         # All empty string by default (no override)
         assert web["backend"] == ""
         assert web["search_backend"] == ""
+        assert web["search_fallback_backends"] == ["brave-free", "ddgs"]
         assert web["extract_backend"] == ""
 
 
@@ -492,4 +494,3 @@ class TestDispatchersTriggerPluginDiscovery:
             assert web_search_registry.get_provider("brave-free") is not None
         finally:
             restore()
-

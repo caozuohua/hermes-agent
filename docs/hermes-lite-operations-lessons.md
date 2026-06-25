@@ -135,6 +135,22 @@ The cost-aware Tavily policy is:
 This keeps `web_search` useful without reintroducing `web_extract` or spending
 free quota on full-text fetches for simple questions.
 
+Provider strategy:
+
+- Keep one model-visible tool: `web_search`
+- Use Tavily as the primary high-quality provider while free credits last
+- Use Brave Search as the first API-key fallback because its monthly free credit
+  is stable enough for light usage
+- Keep `ddgs` installed as the final no-key DuckDuckGo fallback for failures or
+  empty results
+- Use SearXNG only if a reliable self-hosted/public instance is available
+- Treat Exa, Parallel, Firecrawl, and xAI as quality/paid or grant-backed
+  providers, not guaranteed free daily fallbacks
+
+The search fallback should live behind the same `web_search` tool. Do not add a
+second model-visible `duckduckgo_search` tool unless the user explicitly needs
+manual backend selection.
+
 ## Model And Compression Lessons
 
 Fallback models must be evaluated on context window and TPM behavior, not just
@@ -269,4 +285,3 @@ current account. Pushes go to the writable fork remote instead.
   environment-filtered.
 - "GitHub push failed" may be an auth/remote issue while local build and site
   generation are fine.
-

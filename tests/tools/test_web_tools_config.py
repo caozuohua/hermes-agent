@@ -535,6 +535,144 @@ class TestWebSearchSchema:
 class TestWebSearchErrorHandling:
     """Test suite for web_search_tool() error responses."""
 
+    def test_search_failure_falls_back_to_ddgs_when_available(self):
+        import tools.web_tools
+
+        primary_search = MagicMock(return_value={"success": False, "error": "quota exceeded"})
+        primary_provider = MagicMock(
+            name="TavilyWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        primary_provider.search = primary_search
+        primary_provider.name = "tavily"
+
+        fallback_search = MagicMock(return_value={
+            "success": True,
+            "data": {"web": [
+                {
+                    "title": "Fallback",
+                    "url": "https://example.com",
+                    "description": "from ddgs",
+                    "position": 1,
+                }
+            ]},
+        })
+        fallback_provider = MagicMock(
+            name="DDGSWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        fallback_provider.search = fallback_search
+        fallback_provider.name = "ddgs"
+
+        def provider_lookup(name):
+            return {"tavily": primary_provider, "ddgs": fallback_provider}.get(name)
+
+        with patch("tools.web_tools._get_search_backend", return_value="tavily"), \
+             patch("tools.web_tools._get_search_fallback_backends", return_value=["ddgs"]), \
+             patch("agent.web_search_registry.get_provider", side_effect=provider_lookup), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test query", limit=3))
+
+        assert result["success"] is True
+        assert result["fallback_used"] is True
+        assert result["fallback_from"] == "tavily"
+        assert result["provider"] == "ddgs"
+        primary_search.assert_called_once_with("test query", 3)
+        fallback_search.assert_called_once_with("test query", 3)
+
+    def test_search_success_does_not_call_ddgs_fallback(self):
+        import tools.web_tools
+
+        primary_search = MagicMock(return_value={
+            "success": True,
+            "data": {"web": [
+                {
+                    "title": "Primary",
+                    "url": "https://example.com",
+                    "description": "from tavily",
+                    "position": 1,
+                }
+            ]},
+        })
+        primary_provider = MagicMock(
+            name="TavilyWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        primary_provider.search = primary_search
+        primary_provider.name = "tavily"
+
+        fallback_provider = MagicMock(
+            name="DDGSWebSearchProvider",
+            supports_search=MagicMock(return_value=True),
+        )
+        fallback_provider.search = MagicMock(return_value={"success": True, "data": {"web": []}})
+        fallback_provider.name = "ddgs"
+
+        def provider_lookup(name):
+            return {"tavily": primary_provider, "ddgs": fallback_provider}.get(name)
+
+        with patch("tools.web_tools._get_search_backend", return_value="tavily"), \
+             patch("tools.web_tools._get_search_fallback_backends", return_value=["ddgs"]), \
+             patch("agent.web_search_registry.get_provider", side_effect=provider_lookup), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test query", limit=3))
+
+        assert result["success"] is True
+        assert "fallback_used" not in result
+        primary_search.assert_called_once_with("test query", 3)
+        fallback_provider.search.assert_not_called()
+
+    def test_search_fallback_chain_continues_after_failed_brave(self):
+        import tools.web_tools
+
+        primary_provider = MagicMock(supports_search=MagicMock(return_value=True))
+        primary_provider.name = "tavily"
+        primary_provider.search = MagicMock(return_value={"success": False, "error": "quota exceeded"})
+
+        brave_provider = MagicMock(supports_search=MagicMock(return_value=True))
+        brave_provider.name = "brave-free"
+        brave_provider.search = MagicMock(return_value={"success": False, "error": "temporary brave error"})
+
+        ddgs_provider = MagicMock(supports_search=MagicMock(return_value=True))
+        ddgs_provider.name = "ddgs"
+        ddgs_provider.search = MagicMock(return_value={
+            "success": True,
+            "data": {"web": [
+                {
+                    "title": "DDGS",
+                    "url": "https://example.com/ddgs",
+                    "description": "from ddgs",
+                    "position": 1,
+                }
+            ]},
+        })
+
+        def provider_lookup(name):
+            return {
+                "tavily": primary_provider,
+                "brave-free": brave_provider,
+                "ddgs": ddgs_provider,
+            }.get(name)
+
+        with patch("tools.web_tools._get_search_backend", return_value="tavily"), \
+             patch("tools.web_tools._get_search_fallback_backends", return_value=["brave-free", "ddgs"]), \
+             patch("agent.web_search_registry.get_provider", side_effect=provider_lookup), \
+             patch("tools.interrupt.is_interrupted", return_value=False), \
+             patch.object(tools.web_tools._debug, "log_call"), \
+             patch.object(tools.web_tools._debug, "save"):
+            result = json.loads(tools.web_tools.web_search_tool("test query", limit=3))
+
+        assert result["success"] is True
+        assert result["provider"] == "ddgs"
+        assert result["fallback_from"] == "tavily"
+        primary_provider.search.assert_called_once_with("test query", 3)
+        brave_provider.search.assert_called_once_with("test query", 3)
+        ddgs_provider.search.assert_called_once_with("test query", 3)
+
     def test_search_error_response_does_not_expose_diagnostics(self):
         import tools.web_tools
 

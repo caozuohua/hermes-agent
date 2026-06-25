@@ -190,6 +190,54 @@ def _get_search_backend() -> str:
     return _get_capability_backend("search")
 
 
+def _normalize_search_fallback_backends(value: Any) -> List[str]:
+    """Normalize a config value into ordered fallback backend names."""
+    if value is None:
+        return []
+    if isinstance(value, str):
+        raw_items = re.split(r"[,\s]+", value)
+    elif isinstance(value, (list, tuple)):
+        raw_items = [str(item) for item in value]
+    else:
+        raw_items = [str(value)]
+    disabled = {"", "none", "off", "false", "disabled"}
+    normalized: List[str] = []
+    for item in raw_items:
+        name = str(item or "").lower().strip()
+        if name in disabled or name in normalized:
+            continue
+        normalized.append(name)
+    return normalized
+
+
+def _get_search_fallback_backends(primary_backend: str = "") -> List[str]:
+    """Return optional fallback backends for ``web_search``.
+
+    Defaults to Brave Search when a free-tier API key is configured, then DDGS
+    as a no-key DuckDuckGo fallback. Operators can override with either
+    ``web.search_fallback_backends`` (list or comma/space-separated string) or
+    the legacy singular ``web.search_fallback_backend`` key.
+    """
+    cfg = _load_web_config()
+    if "search_fallback_backends" in cfg:
+        configured = _normalize_search_fallback_backends(cfg.get("search_fallback_backends"))
+    elif "search_fallback_backend" in cfg:
+        configured = _normalize_search_fallback_backends(cfg.get("search_fallback_backend"))
+    else:
+        configured = ["brave-free", "ddgs"]
+    primary = (primary_backend or "").lower().strip()
+    return [
+        name for name in configured
+        if name != primary and _is_backend_available(name)
+    ]
+
+
+def _get_search_fallback_backend(primary_backend: str = "") -> str:
+    """Backward-compatible single fallback helper."""
+    backends = _get_search_fallback_backends(primary_backend)
+    return backends[0] if backends else ""
+
+
 def _get_extract_backend() -> str:
     """Determine which backend to use for web_extract specifically.
 
@@ -199,6 +247,20 @@ def _get_extract_backend() -> str:
     3. Auto-detect from env vars
     """
     return _get_capability_backend("extract")
+
+
+def _web_search_response_failed(response_data: Dict[str, Any]) -> bool:
+    return isinstance(response_data, dict) and response_data.get("success") is False
+
+
+def _web_search_response_empty(response_data: Dict[str, Any]) -> bool:
+    if not isinstance(response_data, dict):
+        return False
+    data = response_data.get("data")
+    if not isinstance(data, dict):
+        return False
+    web_results = data.get("web")
+    return isinstance(web_results, list) and len(web_results) == 0
 
 
 def _get_capability_backend(capability: str) -> str:
@@ -857,6 +919,7 @@ def web_search_tool(query: str, limit: int = 5) -> str:
             # configured backend isn't a registered search provider (typo,
             # uninstalled plugin, or capability mismatch).
             provider = get_active_search_provider()
+            backend = getattr(provider, "name", "") if provider is not None else backend
 
         if provider is None:
             response_data = {
@@ -872,6 +935,37 @@ def web_search_tool(query: str, limit: int = 5) -> str:
                 provider.name, query, limit,
             )
             response_data = provider.search(query, limit)
+            fallback_backends = _get_search_fallback_backends(provider.name)
+            if fallback_backends and (
+                _web_search_response_failed(response_data)
+                or _web_search_response_empty(response_data)
+            ):
+                for fallback_backend in fallback_backends:
+                    fallback_provider = _wsp_get_provider(fallback_backend)
+                    if (
+                        fallback_provider is None
+                        or fallback_provider is provider
+                        or fallback_provider.name == provider.name
+                        or not fallback_provider.supports_search()
+                    ):
+                        continue
+                    logger.info(
+                        "Web search via %s returned %s; retrying via %s",
+                        provider.name,
+                        "failure" if _web_search_response_failed(response_data) else "empty results",
+                        fallback_provider.name,
+                    )
+                    fallback_response = fallback_provider.search(query, limit)
+                    if (
+                        not _web_search_response_failed(fallback_response)
+                        and not _web_search_response_empty(fallback_response)
+                    ):
+                        if isinstance(fallback_response, dict):
+                            fallback_response["fallback_used"] = True
+                            fallback_response["fallback_from"] = provider.name
+                            fallback_response["provider"] = fallback_provider.name
+                        response_data = fallback_response
+                        break
 
         debug_call_data["results_count"] = len(response_data.get("data", {}).get("web", []))
         result_json = json.dumps(response_data, indent=2, ensure_ascii=False)
