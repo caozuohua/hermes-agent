@@ -2094,11 +2094,11 @@ DEFAULT_CONFIG = {
     # Or dict format: {"name": {"description": "...", "system_prompt": "...", "tone": "...", "style": "..."}}
     "personalities": {},
 
-    # Pre-exec security scanning via tirith
+    # Optional pre-exec security scanning via tirith
     "security": {
         "allow_private_urls": False,  # Allow requests to private/internal IPs (for OpenWrt, proxies, VPNs)
         "redact_secrets": True,
-        "tirith_enabled": True,
+        "tirith_enabled": False,
         "tirith_path": "tirith",
         "tirith_timeout": 5,
         "tirith_fail_open": True,
@@ -5520,13 +5520,13 @@ _SECURITY_COMMENT = """
 # tokens, and passwords are masked in tool output, logs, and chat
 # responses before the model or user ever sees them. Set redact_secrets
 # to false to disable (e.g. when developing the redactor itself).
-# tirith pre-exec scanning is enabled by default when the tirith binary
-# is available. Configure via security.tirith_* keys or env vars
+# tirith pre-exec scanning is disabled by default for lightweight/stable
+# profiles. Configure via security.tirith_* keys or env vars
 # (TIRITH_ENABLED, TIRITH_BIN, TIRITH_TIMEOUT, TIRITH_FAIL_OPEN).
 #
 # security:
 #   redact_secrets: true
-#   tirith_enabled: true
+#   tirith_enabled: false
 #   tirith_path: "tirith"
 #   tirith_timeout: 5
 #   tirith_fail_open: true

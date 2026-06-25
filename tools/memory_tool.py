@@ -332,9 +332,10 @@ class MemoryStore:
                     "error": (
                         f"Memory at {current:,}/{limit:,} chars. "
                         f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Consolidate now: use 'replace' to merge overlapping entries into "
-                        f"shorter ones or 'remove' stale or less important entries (see "
-                        f"current_entries below), then retry this add — all in this turn."
+                        f"Consolidate now instead of retrying add: use one memory call with "
+                        f"the operations array to remove stale entries and/or replace "
+                        f"overlapping entries with one shorter merged entry. Keep durable "
+                        f"preferences/facts only; move procedures to skills or docs."
                     ),
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
@@ -397,9 +398,11 @@ class MemoryStore:
                     "success": False,
                     "error": (
                         f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
-                        f"Shorten the new content, or 'remove' other stale or less important "
-                        f"entries to make room (see current_entries below), then retry — all "
-                        f"in this turn."
+                        f"Shorten the replacement, or use one memory call with the operations "
+                        f"array to remove stale entries and replace overlapping entries with "
+                        f"one shorter merged entry. Retry only with operations, not a plain "
+                        f"add. Keep durable preferences/facts only; move "
+                        f"procedures to skills or docs."
                     ),
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
@@ -477,6 +480,100 @@ class MemoryStore:
         }
         if message:
             resp["message"] = message
+        return resp
+
+    def apply_operations(self, target: str, operations: List[Dict[str, Any]]) -> Dict[str, Any]:
+        """Apply multiple memory mutations atomically against one target.
+
+        This is the intended path when the store is near its character budget:
+        remove/replace stale entries and add the compact replacement in one
+        call, so the model does not get stuck retrying single overflowing adds.
+        """
+        if not operations:
+            return {"success": False, "error": "operations cannot be empty."}
+
+        with self._file_lock(self._path_for(target)):
+            bak = self._reload_target(target)
+            if bak:
+                return _drift_error(self._path_for(target), bak)
+
+            original_entries = self._entries_for(target)
+            entries = original_entries.copy()
+            limit = self._char_limit(target)
+
+            for idx, op in enumerate(operations, start=1):
+                action = str(op.get("action") or "").strip()
+                content = (op.get("content") or "").strip()
+                old_text = (op.get("old_text") or "").strip()
+
+                if action not in {"add", "replace", "remove"}:
+                    return {
+                        "success": False,
+                        "error": f"Operation {idx}: unknown action '{action}'. Use add, replace, or remove.",
+                        "current_entries": original_entries,
+                    }
+
+                if action == "add":
+                    if not content:
+                        return {"success": False, "error": f"Operation {idx}: content is required for add."}
+                    scan_error = _scan_memory_content(content)
+                    if scan_error:
+                        return {"success": False, "error": f"Operation {idx}: {scan_error}"}
+                    if content not in entries:
+                        entries.append(content)
+                    continue
+
+                if not old_text:
+                    return {"success": False, "error": f"Operation {idx}: old_text is required for {action}."}
+
+                matches = [(i, e) for i, e in enumerate(entries) if old_text in e]
+                if not matches:
+                    return {
+                        "success": False,
+                        "error": f"Operation {idx}: no entry matched '{old_text}'.",
+                        "current_entries": original_entries,
+                    }
+                if len(matches) > 1:
+                    unique_texts = {e for _, e in matches}
+                    if len(unique_texts) > 1:
+                        previews = [e[:80] + ("..." if len(e) > 80 else "") for _, e in matches]
+                        return {
+                            "success": False,
+                            "error": f"Operation {idx}: multiple entries matched '{old_text}'. Be more specific.",
+                            "matches": previews,
+                            "current_entries": original_entries,
+                        }
+
+                match_idx = matches[0][0]
+                if action == "replace":
+                    if not content:
+                        return {"success": False, "error": f"Operation {idx}: content is required for replace."}
+                    scan_error = _scan_memory_content(content)
+                    if scan_error:
+                        return {"success": False, "error": f"Operation {idx}: {scan_error}"}
+                    entries[match_idx] = content
+                else:
+                    entries.pop(match_idx)
+
+            final_total = len(ENTRY_DELIMITER.join(entries))
+            if final_total > limit:
+                current = len(ENTRY_DELIMITER.join(original_entries))
+                return {
+                    "success": False,
+                    "error": (
+                        f"Batch would exceed the memory limit at {final_total:,}/{limit:,} chars. "
+                        "Make the replacement shorter or remove more stale entries in the same "
+                        "operations array; do not retry with a plain add."
+                    ),
+                    "current_entries": original_entries,
+                    "usage": f"{current:,}/{limit:,}",
+                }
+
+            self._set_entries(target, entries)
+            self.save_to_disk(target)
+
+        resp = self._success_response(target, "Batch operations applied.")
+        resp["done"] = True
         return resp
 
     def _render_block(self, target: str, entries: List[str]) -> str:
@@ -663,11 +760,46 @@ def _apply_write_gate(action: str, target: str, content: Optional[str],
     )
 
 
+def _apply_operations_write_gate(target: str, operations: List[Dict[str, Any]]) -> Optional[str]:
+    """Evaluate the memory write gate for an atomic operations batch."""
+    try:
+        from tools import write_approval as wa
+    except Exception:
+        return None
+
+    label = "user profile" if target == "user" else "memory"
+    summary = f"batch update {label} ({len(operations)} operation(s))"
+    detail = json.dumps(operations, ensure_ascii=False, indent=2)
+    decision = wa.evaluate_gate(wa.MEMORY, inline_summary=summary, inline_detail=detail)
+
+    if decision.allow:
+        return None
+
+    if decision.blocked:
+        return tool_error(decision.message, success=False)
+
+    payload = {
+        "target": target,
+        "operations": operations,
+    }
+    record = wa.stage_write(
+        wa.MEMORY, payload,
+        summary=summary,
+        origin=wa.current_origin(),
+    )
+    return json.dumps(
+        {"success": True, "staged": True, "pending_id": record["id"],
+         "message": decision.message},
+        ensure_ascii=False,
+    )
+
+
 def memory_tool(
-    action: str,
+    action: str = "",
     target: str = "memory",
     content: str = None,
     old_text: str = None,
+    operations: Optional[List[Dict[str, Any]]] = None,
     store: Optional[MemoryStore] = None,
 ) -> str:
     """
@@ -681,8 +813,23 @@ def memory_tool(
     if target not in {"memory", "user"}:
         return tool_error(f"Invalid target '{target}'. Use 'memory' or 'user'.", success=False)
 
+    if operations is not None:
+        if action:
+            return tool_error("Use either single-op fields or operations, not both.", success=False)
+        if content or old_text:
+            return tool_error("content/old_text belong inside each operation when operations is used.", success=False)
+        if not isinstance(operations, list):
+            return tool_error("operations must be an array.", success=False)
+        gate_result = _apply_operations_write_gate(target, operations)
+        if gate_result is not None:
+            return gate_result
+        result = store.apply_operations(target, operations)
+        return json.dumps(result, ensure_ascii=False)
+
     # Validate required params BEFORE the gate so an invalid write is rejected
     # immediately instead of being staged and only failing at approve time.
+    if not action:
+        return tool_error("action is required unless operations is provided.", success=False)
     if action == "add" and not content:
         return tool_error("Content is required for 'add' action.", success=False)
     if action == "replace" and (not old_text or not content):
@@ -727,6 +874,11 @@ def apply_memory_pending(payload: Dict[str, Any], store: "MemoryStore") -> Dict[
     target = payload.get("target", "memory")
     content = payload.get("content") or ""
     old_text = payload.get("old_text") or ""
+    operations = payload.get("operations")
+    if operations is not None:
+        if not isinstance(operations, list):
+            return {"success": False, "error": "operations must be an array."}
+        return store.apply_operations(target, operations)
     if action == "add":
         return store.add(target, content)
     if action == "replace":
@@ -760,6 +912,13 @@ MEMORY_SCHEMA = {
         "- 'memory': your notes -- environment facts, project conventions, tool quirks, lessons learned\n\n"
         "ACTIONS: add (new entry), replace (update existing -- old_text identifies it), "
         "remove (delete -- old_text identifies it).\n\n"
+        "WHEN MEMORY IS NEAR FULL: prefer one batch call with operations=[...] so you "
+        "can remove stale entries and replace overlapping entries atomically before "
+        "adding a compact merged fact. Do not keep retrying plain add after a limit "
+        "error. Aim to leave 25-35% headroom.\n\n"
+        "COMPRESSION RULES: merge duplicate categories; keep stable facts and user "
+        "preferences; move workflows, logs, topology details, and command recipes to "
+        "skills or docs and store only a short pointer.\n\n"
         "SKIP: trivial/obvious info, things easily re-discovered, raw data dumps, and temporary task state."
     ),
     "parameters": {
@@ -783,8 +942,34 @@ MEMORY_SCHEMA = {
                 "type": "string",
                 "description": "Short unique substring identifying the entry to replace or remove."
             },
+            "operations": {
+                "type": "array",
+                "description": (
+                    "Atomic batch of add/replace/remove operations for one target. "
+                    "Use this when consolidating memory near the char limit."
+                ),
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "action": {
+                            "type": "string",
+                            "enum": ["add", "replace", "remove"],
+                            "description": "Operation action."
+                        },
+                        "content": {
+                            "type": "string",
+                            "description": "Entry content for add/replace."
+                        },
+                        "old_text": {
+                            "type": "string",
+                            "description": "Short unique substring for replace/remove."
+                        },
+                    },
+                    "required": ["action"],
+                },
+            },
         },
-        "required": ["action", "target"],
+        "required": ["target"],
     },
 }
 
@@ -801,11 +986,8 @@ registry.register(
         target=args.get("target", "memory"),
         content=args.get("content"),
         old_text=args.get("old_text"),
+        operations=args.get("operations"),
         store=kw.get("store")),
     check_fn=check_memory_requirements,
     emoji="🧠",
 )
-
-
-
-
