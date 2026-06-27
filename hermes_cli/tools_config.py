@@ -34,6 +34,8 @@ from utils import base_url_hostname, is_truthy_value
 
 logger = logging.getLogger(__name__)
 
+_warned_invalid_platform_toolsets: Set[str] = set()
+
 PROJECT_ROOT = Path(__file__).parent.parent.resolve()
 
 
@@ -1534,6 +1536,23 @@ def _get_platform_tools(
     if disabled_toolsets:
         disabled_set = {str(ts) for ts in disabled_toolsets}
         enabled_toolsets -= disabled_set
+
+    explicit = platform_toolsets.get(platform)
+    if isinstance(explicit, list) and explicit:
+        from toolsets import validate_toolset
+
+        named = [str(t) for t in explicit if isinstance(t, str) and t]
+        if bool(named) and not any(validate_toolset(t) for t in named):
+            if platform not in _warned_invalid_platform_toolsets:
+                _warned_invalid_platform_toolsets.add(platform)
+                logger.warning(
+                    "platform '%s' has no valid toolsets configured (unknown "
+                    "name(s): %s) - tools will be unavailable. Run `hermes tools` "
+                    "to reconfigure.",
+                    platform,
+                    ", ".join(named),
+                )
+            return set()
 
     return enabled_toolsets
 
@@ -3918,3 +3937,51 @@ def tools_disable_enable_command(args):
     if successful:
         verb = "Disabled" if action == "disable" else "Enabled"
         _print_success(f"{verb}: {', '.join(successful)}")
+
+
+def tools_budget_check_command(args) -> int:
+    """Check the final model-visible tool surface against a count budget."""
+    platform = getattr(args, "platform", "cli")
+    max_tools = getattr(args, "max_tools", 1)
+    output_json = bool(getattr(args, "json", False))
+    config = load_config()
+
+    if platform not in PLATFORMS:
+        _print_error(f"Unknown platform '{platform}'. Valid: {', '.join(PLATFORMS)}")
+        return 2
+    if max_tools is not None and max_tools < 0:
+        _print_error("--max-tools must be >= 0")
+        return 2
+
+    enabled_toolsets = sorted(_get_platform_tools(config, platform))
+    agent_cfg = config.get("agent") or {}
+    disabled_toolsets = agent_cfg.get("disabled_toolsets") or None
+
+    from model_tools import get_tool_surface_budget_report
+
+    report = get_tool_surface_budget_report(
+        enabled_toolsets=enabled_toolsets,
+        disabled_toolsets=disabled_toolsets,
+        max_tools=max_tools,
+    )
+
+    if output_json:
+        print(_json.dumps(report, indent=2, sort_keys=True))
+    else:
+        status = "OK" if report["within_budget"] else "OVER"
+        count = report["tool_count"]
+        limit = report["max_tools"]
+        print(f"Tool surface budget: {status}")
+        print(f"  Platform: {platform}")
+        print(f"  Toolsets: {', '.join(enabled_toolsets) if enabled_toolsets else '(none)'}")
+        if disabled_toolsets:
+            print(f"  Disabled toolsets: {', '.join(disabled_toolsets)}")
+        print(f"  Visible: {count}/{limit} model-visible tools")
+        if report["tool_names"]:
+            print(f"  Tools: {', '.join(report['tool_names'])}")
+        else:
+            print("  Tools: (none)")
+        if not report["within_budget"]:
+            print(f"  Over budget by: {report['over_budget_by']}")
+
+    return 0 if report["within_budget"] else 1

@@ -11479,6 +11479,10 @@ def cmd_tools(args):
         from hermes_cli.tools_config import tools_disable_enable_command
 
         tools_disable_enable_command(args)
+    elif action == "budget-check":
+        from hermes_cli.tools_config import tools_budget_check_command
+
+        sys.exit(tools_budget_check_command(args))
     elif action == "post-setup":
         from hermes_cli.tools_config import run_post_setup_command
 

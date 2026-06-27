@@ -794,6 +794,25 @@ def _apply_operations_write_gate(target: str, operations: List[Dict[str, Any]]) 
     )
 
 
+def _missing_old_text_error(store: "MemoryStore", target: str, action: str) -> str:
+    entries = store._entries_for(target)
+    current = store._char_count(target)
+    limit = store._char_limit(target)
+    return json.dumps(
+        {
+            "success": False,
+            "error": (
+                f"'{action}' needs old_text -- a short unique substring of the "
+                f"entry to {action}. None was provided. Reissue the {action} "
+                "with old_text set to part of one of the current_entries below."
+            ),
+            "current_entries": entries,
+            "usage": f"{current:,}/{limit:,}",
+        },
+        ensure_ascii=False,
+    )
+
+
 def memory_tool(
     action: str = "",
     target: str = "memory",
@@ -834,9 +853,11 @@ def memory_tool(
         return tool_error("Content is required for 'add' action.", success=False)
     if action == "replace" and (not old_text or not content):
         missing = "old_text" if not old_text else "content"
+        if not old_text:
+            return _missing_old_text_error(store, target, "replace")
         return tool_error(f"{missing} is required for 'replace' action.", success=False)
     if action == "remove" and not old_text:
-        return tool_error("old_text is required for 'remove' action.", success=False)
+        return _missing_old_text_error(store, target, "remove")
 
     # Approval gate: when on, stages the write (background/gateway) or prompts
     # inline (interactive CLI); when off (default) passes straight through.
@@ -940,7 +961,7 @@ MEMORY_SCHEMA = {
             },
             "old_text": {
                 "type": "string",
-                "description": "Short unique substring identifying the entry to replace or remove."
+                "description": "REQUIRED for 'replace' and 'remove': short unique substring identifying the existing entry. Omit only for 'add'."
             },
             "operations": {
                 "type": "array",

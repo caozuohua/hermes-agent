@@ -8,6 +8,7 @@ from model_tools import (
     handle_function_call,
     get_all_tool_names,
     get_toolset_for_tool,
+    get_tool_surface_budget_report,
     _AGENT_LOOP_TOOLS,
     _LEGACY_TOOLSET_MAP,
     TOOL_TO_TOOLSET_MAP,
@@ -390,6 +391,51 @@ class TestLegacyToolsetMap:
 
 
 # =========================================================================
+# Tool-surface budget reports
+# =========================================================================
+
+class TestToolSurfaceBudgetReport:
+    def test_counts_actual_model_visible_schemas_not_resolved_toolset_names(self):
+        def fake_get_tool_definitions(**kwargs):
+            assert kwargs["enabled_toolsets"] == ["search", "terminal", "file"]
+            assert kwargs["disabled_toolsets"] == ["browser"]
+            assert kwargs["quiet_mode"] is True
+            return [
+                {"type": "function", "function": {"name": "web_search"}},
+                {"type": "function", "function": {"name": "terminal"}},
+            ]
+
+        with patch("model_tools.get_tool_definitions", side_effect=fake_get_tool_definitions):
+            report = get_tool_surface_budget_report(
+                enabled_toolsets=["search", "terminal", "file"],
+                disabled_toolsets=["browser"],
+                max_tools=2,
+            )
+
+        assert report["tool_count"] == 2
+        assert report["tool_names"] == ["terminal", "web_search"]
+        assert report["max_tools"] == 2
+        assert report["within_budget"] is True
+
+    def test_budget_report_fails_when_model_visible_count_exceeds_limit(self):
+        with patch(
+            "model_tools.get_tool_definitions",
+            return_value=[
+                {"type": "function", "function": {"name": "web_search"}},
+                {"type": "function", "function": {"name": "web_extract"}},
+            ],
+        ):
+            report = get_tool_surface_budget_report(
+                enabled_toolsets=["web"],
+                max_tools=1,
+            )
+
+        assert report["tool_count"] == 2
+        assert report["over_budget_by"] == 1
+        assert report["within_budget"] is False
+
+
+# =========================================================================
 # Backward-compat wrappers
 # =========================================================================
 
@@ -433,6 +479,35 @@ class TestCoerceNumberInfNan:
     def test_negative_inf_returns_original_string(self):
         from model_tools import _coerce_number
         assert _coerce_number("-inf") == "-inf"
+
+
+class TestDisabledToolsetsPlatformBundle:
+    """Disabling a hermes-* platform bundle must not strip shared core tools."""
+
+    def test_disabling_platform_bundle_preserves_core_tools(self):
+        from model_tools import get_tool_definitions
+
+        tools_telegram = get_tool_definitions(
+            enabled_toolsets=["hermes-telegram"],
+            quiet_mode=True,
+        )
+        tools_telegram_no_yuanbao = get_tool_definitions(
+            enabled_toolsets=["hermes-telegram"],
+            disabled_toolsets=["hermes-yuanbao"],
+            quiet_mode=True,
+        )
+        names_telegram = {t["function"]["name"] for t in tools_telegram}
+        names_no_yuanbao = {t["function"]["name"] for t in tools_telegram_no_yuanbao}
+
+        assert names_telegram == names_no_yuanbao
+
+    def test_disabling_bundle_removes_platform_delta_but_keeps_core(self):
+        from toolsets import bundle_non_core_tools, _HERMES_CORE_TOOLS
+
+        delta = bundle_non_core_tools("hermes-yuanbao")
+
+        assert "yb_send_dm" in delta
+        assert not (delta & set(_HERMES_CORE_TOOLS))
 
     def test_nan_returns_original_string(self):
         from model_tools import _coerce_number

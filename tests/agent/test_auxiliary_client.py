@@ -29,6 +29,9 @@ from agent.auxiliary_client import (
     _resolve_auto,
     _resolve_xai_oauth_for_aux,
     _CodexCompletionsAdapter,
+    _is_anthropic_compatible_host,
+    _recover_aux_response_message,
+    _is_invalid_aux_response_error,
 )
 
 
@@ -71,6 +74,45 @@ def _clean_env(monkeypatch):
     yield
     _aux_mod._aux_unhealthy_until.clear()
     _aux_mod._aux_unhealthy_logged_at.clear()
+
+
+class TestAuxiliaryResponseRecovery:
+    def test_recovers_output_text_to_choices_message(self):
+        response = SimpleNamespace(output_text="summary", choices=[])
+
+        recovered = _recover_aux_response_message(response)
+
+        assert recovered.choices[0].message.content == "summary"
+
+    def test_recovers_responses_output_parts_to_choices_message(self):
+        response = {
+            "output": [
+                {
+                    "type": "message",
+                    "content": [{"type": "output_text", "text": "hello"}],
+                }
+            ]
+        }
+
+        recovered = _recover_aux_response_message(response)
+
+        assert recovered.choices[0].message.content == "hello"
+
+    def test_invalid_aux_response_error_is_fallback_eligible(self):
+        exc = RuntimeError(
+            "Auxiliary summarizer LLM returned invalid response "
+            "(missing choices[0].message). Expected object with .choices[0].message"
+        )
+
+        assert _is_invalid_aux_response_error(exc) is True
+
+
+class TestAnthropicCompatibleHost:
+    def test_allows_anthropic_default_host(self):
+        assert _is_anthropic_compatible_host("https://api.anthropic.com/v1") is True
+
+    def test_rejects_non_anthropic_proxy_host(self):
+        assert _is_anthropic_compatible_host("https://openrouter.ai/api/v1") is False
 
 
 @pytest.fixture

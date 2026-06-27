@@ -435,12 +435,28 @@ class TestMemoryToolDispatcher:
         assert result["success"] is True
 
     def test_replace_requires_old_text(self, store):
+        store.add("memory", "fact A")
+        store.add("memory", "fact B")
         result = json.loads(memory_tool(action="replace", content="new", store=store))
         assert result["success"] is False
+        assert "old_text" in result["error"]
+        assert result["current_entries"] == ["fact A", "fact B"]
+        assert "usage" in result
 
     def test_remove_requires_old_text(self, store):
+        store.add("memory", "fact A")
         result = json.loads(memory_tool(action="remove", store=store))
         assert result["success"] is False
+        assert "old_text" in result["error"]
+        assert result["current_entries"] == ["fact A"]
+        assert "usage" in result
+
+    def test_replace_missing_content_still_distinct_error(self, store):
+        store.add("memory", "fact A")
+        result = json.loads(memory_tool(action="replace", old_text="fact A", store=store))
+        assert result["success"] is False
+        assert "content is required" in result["error"]
+        assert "current_entries" not in result
 
 
 class TestMemoryBatch:

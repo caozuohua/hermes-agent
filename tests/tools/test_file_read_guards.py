@@ -161,7 +161,7 @@ class TestDevicePathBlocking(unittest.TestCase):
 # ---------------------------------------------------------------------------
 
 class TestCharacterCountGuard(unittest.TestCase):
-    """Large reads should be rejected with guidance to use offset/limit."""
+    """Large reads should be truncated with guidance to continue."""
 
     def setUp(self):
         _read_tracker.clear()
@@ -170,20 +170,37 @@ class TestCharacterCountGuard(unittest.TestCase):
         _read_tracker.clear()
 
     @patch("tools.file_tools._get_file_ops")
-    @patch("tools.file_tools._get_max_read_chars", return_value=_DEFAULT_MAX_READ_CHARS)
-    def test_oversized_read_rejected(self, _mock_limit, mock_ops):
-        """A read that returns >max chars is rejected."""
-        big_content = "x" * (_DEFAULT_MAX_READ_CHARS + 1)
+    @patch("tools.file_tools._get_max_read_chars", return_value=1000)
+    def test_oversized_read_truncated_with_continuation(self, _mock_limit, mock_ops):
+        big_content = "\n".join(f"{i}|" + "z" * 98 for i in range(1, 51))
         mock_ops.return_value = _make_fake_ops(
             content=big_content,
-            total_lines=5000,
-            file_size=len(big_content) + 100,  # bigger than content
+            total_lines=50,
+            file_size=len(big_content),
         )
         result = json.loads(read_file_tool("/tmp/huge.txt", task_id="big"))
-        self.assertIn("error", result)
-        self.assertIn("safety limit", result["error"])
-        self.assertIn("offset and limit", result["error"])
-        self.assertIn("total_lines", result)
+        self.assertNotIn("error", result)
+        self.assertTrue(result["content"])
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["truncated_by"], "bytes")
+        self.assertGreater(result["next_offset"], 1)
+        self.assertLessEqual(len(result["content"]), 1000)
+        self.assertIn("offset", result["hint"])
+
+    @patch("tools.file_tools._get_file_ops")
+    @patch("tools.file_tools._get_max_read_chars", return_value=1000)
+    def test_single_oversized_line_clamped_not_empty(self, _mock_limit, mock_ops):
+        big_content = "1|" + "q" * 5000
+        mock_ops.return_value = _make_fake_ops(
+            content=big_content,
+            total_lines=1,
+            file_size=len(big_content),
+        )
+        result = json.loads(read_file_tool("/tmp/oneline.txt", task_id="oneline"))
+        self.assertNotIn("error", result)
+        self.assertTrue(result["content"])
+        self.assertEqual(result["truncated_by"], "bytes")
+        self.assertEqual(result["next_offset"], 2)
 
     @patch("tools.file_tools._get_file_ops")
     def test_small_read_not_rejected(self, mock_ops):
@@ -204,6 +221,16 @@ class TestCharacterCountGuard(unittest.TestCase):
         result = json.loads(read_file_tool("/tmp/justunder.txt", task_id="under"))
         self.assertNotIn("error", result)
         self.assertIn("content", result)
+
+    def test_truncate_to_char_budget_line_boundary(self):
+        from tools.file_tools import _truncate_to_char_budget
+
+        text = "\n".join("x" * 10 for _ in range(5))
+        out, lines, truncated = _truncate_to_char_budget(text, 25)
+
+        self.assertTrue(truncated)
+        self.assertEqual(lines, out.count("\n") + 1)
+        self.assertLessEqual(len(out), 25)
 
 
 # ---------------------------------------------------------------------------
@@ -646,12 +673,14 @@ class TestConfigOverride(unittest.TestCase):
     @patch("tools.file_tools._get_file_ops")
     @patch("hermes_cli.config.load_config", return_value={"file_read_max_chars": 50})
     def test_custom_config_lowers_limit(self, _mock_cfg, mock_ops):
-        """A config value of 50 should reject reads over 50 chars."""
+        """A config value of 50 should truncate reads over 50 chars."""
         mock_ops.return_value = _make_fake_ops(content="x" * 60, file_size=60)
         result = json.loads(read_file_tool("/tmp/cfgtest.txt", task_id="cfg1"))
-        self.assertIn("error", result)
-        self.assertIn("safety limit", result["error"])
-        self.assertIn("50", result["error"])  # should show the configured limit
+        self.assertNotIn("error", result)
+        self.assertTrue(result["truncated"])
+        self.assertEqual(result["truncated_by"], "bytes")
+        self.assertIn("50", result["hint"])
+        self.assertLessEqual(len(result["content"]), 50)
 
     @patch("tools.file_tools._get_file_ops")
     @patch("hermes_cli.config.load_config", return_value={"file_read_max_chars": 500_000})

@@ -71,6 +71,29 @@ def test_agent_disabled_toolsets_empty_list_is_noop():
     assert _get_platform_tools(config_missing, "cli") == default
 
 
+def test_validate_platform_toolsets_warns_unknown_and_zero_valid():
+    from hermes_cli.toolset_validation import validate_platform_toolsets
+
+    valid = {"hermes-cli", "web"}
+
+    warnings = validate_platform_toolsets(
+        {"cli": ["hermes"]},
+        lambda name: name in valid,
+    )
+
+    assert "platform 'cli' references unknown toolset 'hermes' - did you mean 'hermes-cli'?" in warnings
+    assert any("zero valid toolsets" in w for w in warnings)
+
+
+def test_get_platform_tools_warns_when_explicit_config_has_no_valid_toolsets(caplog):
+    config = {"platform_toolsets": {"cli": ["hermes"]}}
+
+    enabled = _get_platform_tools(config, "cli")
+
+    assert enabled == set()
+    assert "no valid toolsets configured" in caplog.text
+
+
 def test_get_platform_tools_uses_default_when_platform_not_configured():
     config = {}
 

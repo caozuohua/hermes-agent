@@ -39,6 +39,33 @@ def build_tools_parser(subparsers, *, cmd_tools: Callable) -> None:
         help="Platform to show (default: cli)",
     )
 
+    # hermes tools budget-check [--platform cli] [--max-tools N]
+    tools_budget_p = tools_sub.add_parser(
+        "budget-check",
+        help="Check the actual model-visible tool count",
+        description=(
+            "Resolve the configured toolsets, run tool availability checks, "
+            "and count the final schemas sent to the model. This catches "
+            "prompt-cost regressions from visible tools, not imported modules."
+        ),
+    )
+    tools_budget_p.add_argument(
+        "--platform",
+        default="cli",
+        help="Platform/profile surface to check (default: cli)",
+    )
+    tools_budget_p.add_argument(
+        "--max-tools",
+        type=int,
+        default=1,
+        help="Maximum allowed model-visible tools (default: 1 for Hermes-Lite)",
+    )
+    tools_budget_p.add_argument(
+        "--json",
+        action="store_true",
+        help="Print the budget report as JSON",
+    )
+
     # hermes tools disable <name...> [--platform cli]
     tools_disable_p = tools_sub.add_parser(
         "disable",

@@ -72,6 +72,20 @@ class TestSafeWriteRoot:
         monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", str(safe_root))
         assert _is_write_denied(str(inside)) is False
 
+    def test_multiple_safe_roots_use_os_pathsep(self, tmp_path: Path, monkeypatch):
+        first = tmp_path / "one"
+        second = tmp_path / "two"
+        outside = tmp_path / "outside" / "file.txt"
+        os.makedirs(first, exist_ok=True)
+        os.makedirs(second, exist_ok=True)
+        os.makedirs(outside.parent, exist_ok=True)
+
+        monkeypatch.setenv("HERMES_WRITE_SAFE_ROOT", os.pathsep.join([str(first), str(second)]))
+
+        assert _is_write_denied(str(first / "a.txt")) is False
+        assert _is_write_denied(str(second / "b.txt")) is False
+        assert _is_write_denied(str(outside)) is True
+
     def test_safe_root_does_not_override_static_deny(self, tmp_path: Path, monkeypatch):
         """Even if a static-denied path is inside the safe root, it's still denied."""
         # Point safe root at home to include ~/.ssh

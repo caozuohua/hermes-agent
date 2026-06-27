@@ -267,6 +267,14 @@ class TestSaveEnvValueSecure:
             env_values = load_env()
             assert env_values["TENOR_API_KEY"] == "sk-test-secret"
 
+    def test_save_env_value_quotes_hash_values_for_roundtrip(self, tmp_path):
+        with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
+            save_env_value("HASH_TOKEN", "abc#def")
+
+            raw = (tmp_path / ".env").read_text(encoding="utf-8")
+            assert 'HASH_TOKEN="abc#def"' in raw
+            assert load_env()["HASH_TOKEN"] == "abc#def"
+
     def test_secure_save_returns_metadata_only(self, tmp_path):
         with patch.dict(os.environ, {"HERMES_HOME": str(tmp_path)}):
             result = save_env_value_secure("GITHUB_TOKEN", "ghp_test_secret")

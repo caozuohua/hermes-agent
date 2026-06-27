@@ -27,6 +27,9 @@ def _install_fake_ddgs(monkeypatch, *, text_results=None, text_raises=None):
     fake = types.ModuleType("ddgs")
 
     class _FakeDDGS:
+        def __init__(self, **kwargs):
+            pass
+
         def __enter__(self):
             return self
         def __exit__(self, *_a):
@@ -154,6 +157,34 @@ class TestDDGSProviderSearch:
         result = DDGSWebSearchProvider().search("nothing", limit=5)
         assert result["success"] is True
         assert result["data"]["web"] == []
+
+    def test_hung_search_times_out_and_returns_failure(self, monkeypatch):
+        import threading
+        import time
+
+        _install_fake_ddgs(monkeypatch)
+        monkeypatch.delitem(sys.modules, "plugins.web.ddgs.provider", raising=False)
+        import plugins.web.ddgs.provider as provider
+
+        release = threading.Event()
+
+        def blocking_search(query, safe_limit):
+            release.wait(timeout=10)
+            return []
+
+        monkeypatch.setattr(provider, "_run_ddgs_search", blocking_search, raising=True)
+        monkeypatch.setattr(provider, "_SEARCH_TIMEOUT_SECS", 0.2, raising=True)
+
+        try:
+            start = time.monotonic()
+            result = provider.DDGSWebSearchProvider().search("hangs forever", limit=5)
+            elapsed = time.monotonic() - start
+        finally:
+            release.set()
+
+        assert result["success"] is False
+        assert "timed out" in result["error"].lower()
+        assert elapsed < 3.0
 
 
 # ---------------------------------------------------------------------------

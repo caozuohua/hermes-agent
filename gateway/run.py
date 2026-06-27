@@ -282,6 +282,13 @@ def _redact_gateway_user_facing_secrets(text: str) -> str:
     return redacted
 
 
+def _redact_approval_command(cmd: "str | None") -> str:
+    """Redact credentials from a command before it leaves the gateway."""
+    from agent.redact import redact_sensitive_text
+
+    return redact_sensitive_text(str(cmd or ""), force=True)
+
+
 def _gateway_provider_error_reply(text: str) -> str:
     """Map raw provider/API errors to a short user-safe Telegram reply."""
     if _GATEWAY_AUTH_ERROR_RE.search(text):
@@ -14587,9 +14594,11 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             # `_resolve_turn_agent_config(message, …)`.
             nonlocal message
 
-            # session_key is now set via contextvars in _set_session_env()
-            # (concurrency-safe). Keep os.environ as fallback for CLI/cron.
-            os.environ["HERMES_SESSION_KEY"] = session_key or ""
+            # session_key is propagated via contextvars in _set_session_env()
+            # and tools.approval.set_current_session_key(). Do not write
+            # os.environ["HERMES_SESSION_KEY"] here: os.environ is process-global,
+            # so concurrent gateway sessions can clobber each other's approval
+            # routing fallback.
 
             # Read from env var or use default (same as CLI)
             max_iterations = int(os.getenv("HERMES_MAX_ITERATIONS", "90"))
@@ -15110,7 +15119,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 # Typing resumes in _handle_approve_command/_handle_deny_command.
                 _status_adapter.pause_typing_for_chat(_status_chat_id)
 
-                cmd = approval_data.get("command", "")
+                cmd = _redact_approval_command(approval_data.get("command", ""))
                 desc = approval_data.get("description", "dangerous command")
 
                 # Prefer button-based approval when the adapter supports it.

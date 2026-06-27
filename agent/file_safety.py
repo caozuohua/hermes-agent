@@ -77,15 +77,34 @@ def build_write_denied_prefixes(home: str) -> list[str]:
     ]
 
 
+def get_safe_write_roots() -> set[str]:
+    """Return resolved HERMES_WRITE_SAFE_ROOT paths split by os.pathsep."""
+    env = os.getenv("HERMES_WRITE_SAFE_ROOT", "")
+    if not env:
+        return set()
+    roots: set[str] = set()
+    for root in env.split(os.pathsep):
+        if not root:
+            continue
+        try:
+            roots.add(os.path.realpath(os.path.expanduser(root)))
+        except (OSError, ValueError):
+            continue
+    return roots
+
+
 def get_safe_write_root() -> Optional[str]:
-    """Return the resolved HERMES_WRITE_SAFE_ROOT path, or None if unset."""
-    root = os.getenv("HERMES_WRITE_SAFE_ROOT", "")
-    if not root:
-        return None
+    """Return one resolved HERMES_WRITE_SAFE_ROOT path, or None if unset."""
+    roots = sorted(get_safe_write_roots())
+    return roots[0] if roots else None
+
+
+def _is_under_root(path: str, root: str) -> bool:
     try:
-        return os.path.realpath(os.path.expanduser(root))
-    except Exception:
-        return None
+        common = os.path.commonpath([path, root])
+    except (OSError, ValueError):
+        return False
+    return common == root
 
 
 def is_write_denied(path: str) -> bool:
@@ -124,8 +143,8 @@ def is_write_denied(path: str) -> bool:
         except Exception:
             pass
 
-    safe_root = get_safe_write_root()
-    if safe_root and not (resolved == safe_root or resolved.startswith(safe_root + os.sep)):
+    safe_roots = get_safe_write_roots()
+    if safe_roots and not any(_is_under_root(resolved, root) for root in safe_roots):
         return True
 
     return False

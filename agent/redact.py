@@ -324,7 +324,24 @@ def _redact_form_body(text: str) -> str:
     return _redact_query_string(text.strip())
 
 
-def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = False) -> str:
+def _mask_token_nonreusable(token: str) -> str:
+    if not token:
+        return "<<redacted-secret>>"
+    label = ""
+    for sub in _PREFIX_SUBSTRINGS:
+        if token.startswith(sub):
+            label = sub
+            break
+    return f"<<redacted:{label}>>" if label else "<<redacted-secret>>"
+
+
+def redact_sensitive_text(
+    text: str,
+    *,
+    force: bool = False,
+    code_file: bool = False,
+    file_read: bool = False,
+) -> str:
     """Apply all redaction patterns to a block of text.
 
     Safe to call on any string -- non-matching text passes through unchanged.
@@ -355,9 +372,13 @@ def redact_sensitive_text(text: str, *, force: bool = False, code_file: bool = F
     if not (force or _REDACT_ENABLED):
         return text
 
+    if file_read:
+        code_file = True
+
     # Known prefixes (sk-, ghp_, etc.) — gate on substring presence
     if _has_known_prefix_substring(text):
-        text = _PREFIX_RE.sub(lambda m: _mask_token(m.group(1)), text)
+        prefix_sub = _mask_token_nonreusable if file_read else _mask_token
+        text = _PREFIX_RE.sub(lambda m: prefix_sub(m.group(1)), text)
 
     # ENV assignments: OPENAI_API_KEY=***  (skip for code files — false positives)
     if not code_file:

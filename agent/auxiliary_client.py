@@ -631,6 +631,21 @@ def _pool_runtime_base_url(entry: Any, fallback: str = "") -> str:
     return str(url or "").strip().rstrip("/")
 
 
+_ANTHROPIC_COMPATIBLE_HOSTS = frozenset({"api.anthropic.com"})
+
+
+def _is_anthropic_compatible_host(url: str) -> bool:
+    if not url:
+        return False
+    try:
+        from urllib.parse import urlparse
+
+        host = (urlparse(url).hostname or "").strip().lower().rstrip(".")
+        return host in _ANTHROPIC_COMPATIBLE_HOSTS
+    except Exception:
+        return False
+
+
 # ── Codex Responses → chat.completions adapter ─────────────────────────────
 # All auxiliary consumers call client.chat.completions.create(**kwargs) and
 # read response.choices[0].message.content. This adapter translates those
@@ -991,9 +1006,10 @@ class AsyncCodexAuxiliaryClient:
 class _AnthropicCompletionsAdapter:
     """OpenAI-client-compatible adapter for Anthropic Messages API."""
 
-    def __init__(self, real_client: Any, model: str, is_oauth: bool = False):
+    def __init__(self, real_client: Any, model: str, base_url: str = "", is_oauth: bool = False):
         self._client = real_client
         self._model = model
+        self._base_url = base_url
         self._is_oauth = is_oauth
 
     def create(self, **kwargs) -> Any:
@@ -1041,7 +1057,14 @@ class _AnthropicCompletionsAdapter:
             if not _forbids_sampling_params(model):
                 anthropic_kwargs["temperature"] = temperature
 
-        response = self._client.messages.create(**anthropic_kwargs)
+        messages_api = self._client.messages
+        stream_fn = getattr(messages_api, "stream", None)
+        if callable(stream_fn) and not _is_anthropic_compatible_host(self._base_url):
+            with stream_fn(**anthropic_kwargs) as stream:
+                response = stream.get_final_message()
+        else:
+            response = messages_api.create(**anthropic_kwargs)
+
         _transport = get_transport("anthropic_messages")
         _nr = _transport.normalize_response(
             response, strip_tool_prefix=self._is_oauth
@@ -1089,7 +1112,7 @@ class AnthropicAuxiliaryClient:
 
     def __init__(self, real_client: Any, model: str, api_key: str, base_url: str, is_oauth: bool = False):
         self._real_client = real_client
-        adapter = _AnthropicCompletionsAdapter(real_client, model, is_oauth=is_oauth)
+        adapter = _AnthropicCompletionsAdapter(real_client, model, base_url=base_url, is_oauth=is_oauth)
         self.chat = _AnthropicChatShim(adapter)
         self.api_key = api_key
         self.base_url = base_url
@@ -2155,9 +2178,9 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
     if not token:
         return None, None
 
-    # Allow base URL override from config.yaml model.base_url, but only
-    # when the configured provider is anthropic — otherwise a non-Anthropic
-    # base_url (e.g. Codex endpoint) would leak into Anthropic requests.
+    # Allow base URL override from config.yaml model.base_url only when it is
+    # actually an Anthropic endpoint. Anthropic-format proxy hosts must not
+    # receive ANTHROPIC_API_KEY auxiliary traffic.
     base_url = _pool_runtime_base_url(entry, _ANTHROPIC_DEFAULT_BASE_URL) if pool_present else _ANTHROPIC_DEFAULT_BASE_URL
     try:
         from hermes_cli.config import load_config
@@ -2167,7 +2190,7 @@ def _try_anthropic(explicit_api_key: str = None) -> Tuple[Optional[Any], Optiona
             cfg_provider = str(model_cfg.get("provider") or "").strip().lower()
             if cfg_provider == "anthropic":
                 cfg_base_url = (model_cfg.get("base_url") or "").strip().rstrip("/")
-                if cfg_base_url:
+                if cfg_base_url and _is_anthropic_compatible_host(cfg_base_url):
                     base_url = cfg_base_url
     except Exception:
         pass
@@ -2475,6 +2498,17 @@ def _is_connection_error(exc: Exception) -> bool:
     )):
         return True
     return False
+
+
+def _is_invalid_aux_response_error(exc: Exception) -> bool:
+    if not isinstance(exc, RuntimeError):
+        return False
+    msg = str(exc).lower()
+    return (
+        "auxiliary " in msg
+        and "llm returned invalid response" in msg
+        and "choices[0].message" in msg
+    )
 
 
 def _is_transient_transport_error(exc: Exception) -> bool:
@@ -5134,6 +5168,58 @@ def _build_call_kwargs(
     return kwargs
 
 
+def _obj_get(obj: Any, key: str, default: Any = None) -> Any:
+    value = getattr(obj, key, default)
+    if value is default and isinstance(obj, dict):
+        value = obj.get(key, default)
+    return value
+
+
+def _extract_aux_response_text(response: Any) -> str:
+    output_text = _obj_get(response, "output_text")
+    if isinstance(output_text, str) and output_text.strip():
+        return output_text.strip()
+
+    output = _obj_get(response, "output")
+    if not isinstance(output, list):
+        return ""
+
+    parts: List[str] = []
+    for item in output:
+        item_type = _obj_get(item, "type")
+        if item_type and item_type != "message":
+            continue
+        for part in (_obj_get(item, "content") or []):
+            part_type = _obj_get(part, "type")
+            if part_type in {"output_text", "text", None}:
+                text = _obj_get(part, "text")
+                if isinstance(text, str) and text.strip():
+                    parts.append(text.strip())
+    return "\n".join(parts).strip()
+
+
+def _recover_aux_response_message(response: Any) -> Optional[Any]:
+    text = _extract_aux_response_text(response)
+    if not text:
+        return None
+
+    choice = SimpleNamespace(
+        message=SimpleNamespace(content=text),
+        finish_reason=getattr(response, "finish_reason", None) or "stop",
+    )
+    try:
+        response.choices = [choice]
+        return response
+    except Exception:
+        return SimpleNamespace(
+            id=_obj_get(response, "id", ""),
+            model=_obj_get(response, "model", ""),
+            object=_obj_get(response, "object", "chat.completion"),
+            choices=[choice],
+            usage=_obj_get(response, "usage", None),
+        )
+
+
 def _validate_llm_response(response: Any, task: str = None) -> Any:
     """Validate that an LLM response has the expected .choices[0].message shape.
 
@@ -5154,6 +5240,9 @@ def _validate_llm_response(response: Any, task: str = None) -> Any:
         if not choices or not hasattr(choices[0], "message"):
             raise AttributeError("missing choices[0].message")
     except (AttributeError, TypeError, IndexError) as exc:
+        recovered = _recover_aux_response_message(response)
+        if recovered is not None:
+            return recovered
         response_type = type(response).__name__
         response_preview = str(response)[:120]
         raise RuntimeError(
@@ -5557,6 +5646,7 @@ def call_llm(
             _is_payment_error(first_err)
             or _is_connection_error(first_err)
             or _is_rate_limit_error(first_err)
+            or _is_invalid_aux_response_error(first_err)
         )
         # Respect explicit provider choice for transient errors (auth, request
         # validation, etc.) but allow fallback when the provider clearly cannot
@@ -5567,7 +5657,11 @@ def call_llm(
         is_auto = resolved_provider in {"auto", "", None}
         # Capacity errors bypass the explicit-provider gate: the provider
         # literally cannot serve this request regardless of user intent.
-        is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
+        is_capacity_error = (
+            _is_payment_error(first_err)
+            or _is_connection_error(first_err)
+            or _is_invalid_aux_response_error(first_err)
+        )
         if should_fallback and (is_auto or is_capacity_error):
             if _is_payment_error(first_err):
                 reason = "payment error"
@@ -5580,6 +5674,8 @@ def call_llm(
                 )
             elif _is_rate_limit_error(first_err):
                 reason = "rate limit"
+            elif _is_invalid_aux_response_error(first_err):
+                reason = "invalid provider response"
             else:
                 reason = "connection error"
             logger.info("Auxiliary %s: %s on %s (%s), trying fallback",
@@ -6009,12 +6105,17 @@ async def async_call_llm(
             _is_payment_error(first_err)
             or _is_connection_error(first_err)
             or _is_rate_limit_error(first_err)
+            or _is_invalid_aux_response_error(first_err)
         )
         # Capacity errors (payment/quota/connection) bypass the explicit-provider
         # gate — the provider cannot serve the request regardless of user intent.
         # See #26803: daily token quota must fall back like a 402 credit error.
         is_auto = resolved_provider in {"auto", "", None}
-        is_capacity_error = _is_payment_error(first_err) or _is_connection_error(first_err)
+        is_capacity_error = (
+            _is_payment_error(first_err)
+            or _is_connection_error(first_err)
+            or _is_invalid_aux_response_error(first_err)
+        )
         if should_fallback and (is_auto or is_capacity_error):
             if _is_payment_error(first_err):
                 reason = "payment error"
@@ -6023,6 +6124,8 @@ async def async_call_llm(
                 )
             elif _is_rate_limit_error(first_err):
                 reason = "rate limit"
+            elif _is_invalid_aux_response_error(first_err):
+                reason = "invalid provider response"
             else:
                 reason = "connection error"
             logger.info("Auxiliary %s (async): %s on %s (%s), trying fallback",

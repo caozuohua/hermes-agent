@@ -486,3 +486,34 @@ class TestXaiToken:
     def test_prefix_visible_in_masked_output(self):
         result = redact_sensitive_text(self.KEY, force=True)
         assert result.startswith("xai-AB")
+
+
+class TestFileReadNonReusableRedaction:
+    GHP = "ghp_S1abcdefghijklmnopqrstuvwxyz0Pn2T"
+    SK = "sk-proj-abcdefghijklmnopqrstuvwxyz0123456789"
+
+    def test_file_read_uses_nonreusable_sentinel(self):
+        out = redact_sensitive_text(f"token: {self.GHP}", force=True, file_read=True)
+
+        assert "<<redacted:ghp_>>" in out
+        assert "..." not in out
+        assert self.GHP not in out
+        assert "Pn2T" not in out
+
+    def test_default_mode_keeps_head_tail_mask(self):
+        out = redact_sensitive_text(f"token: {self.GHP}", force=True)
+
+        assert "<<redacted" not in out
+        assert "ghp_" in out
+        assert "..." in out
+
+    def test_file_read_implies_code_file_no_env_false_positive(self):
+        out = redact_sensitive_text("MAX_TOKENS=8000", force=True, file_read=True)
+
+        assert out == "MAX_TOKENS=8000"
+
+    def test_sk_prefix_also_uses_sentinel(self):
+        out = redact_sensitive_text(f"key: {self.SK}", force=True, file_read=True)
+
+        assert "<<redacted:sk->>" in out
+        assert self.SK not in out

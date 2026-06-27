@@ -58,6 +58,26 @@ def _get_max_read_chars() -> int:
     _max_read_chars_cached = _DEFAULT_MAX_READ_CHARS
     return _max_read_chars_cached
 
+
+def _truncate_to_char_budget(content: str, max_chars: int) -> tuple[str, int, bool]:
+    if len(content) <= max_chars:
+        return content, (content.count("\n") + 1 if content else 0), False
+
+    lines = content.split("\n")
+    kept: list[str] = []
+    running = 0
+    for line in lines:
+        addition = len(line) + (1 if kept else 0)
+        if running + addition > max_chars:
+            break
+        kept.append(line)
+        running += addition
+
+    if not kept:
+        kept.append(lines[0][:max_chars])
+
+    return "\n".join(kept), len(kept), True
+
 # If the total file size exceeds this AND the caller didn't specify a narrow
 # range (limit <= 200), we include a hint encouraging targeted reads.
 _LARGE_FILE_HINT_BYTES = 512_000  # 512 KB
@@ -830,19 +850,23 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
                 content_len = len(result_dict["content"])
                 max_chars = _get_max_read_chars()
                 if content_len > max_chars:
-                    return json.dumps({
-                        "error": (
-                            f"Read produced {content_len:,} characters which exceeds "
-                            f"the safety limit ({max_chars:,} chars). "
-                            "Use offset and limit to read a smaller range. "
-                            f"The document has {total_lines} lines of extracted text."
-                        ),
-                        "path": path,
-                        "total_lines": total_lines,
-                        "file_size": result_dict["file_size"],
-                    }, ensure_ascii=False)
+                    trimmed, lines_kept, _ = _truncate_to_char_budget(
+                        result_dict["content"], max_chars
+                    )
+                    next_offset = offset + lines_kept
+                    shown_end = offset + lines_kept - 1
+                    result_dict["content"] = trimmed
+                    result_dict["truncated"] = True
+                    result_dict["truncated_by"] = "bytes"
+                    result_dict["next_offset"] = next_offset
+                    result_dict["hint"] = (
+                        f"Output truncated at the {max_chars:,}-char read budget "
+                        f"after {lines_kept} line(s) (showing lines {offset}-"
+                        f"{shown_end} of {total_lines}). Use offset={next_offset} "
+                        "to continue."
+                    )
                 if result_dict["content"]:
-                    result_dict["content"] = redact_sensitive_text(result_dict["content"], code_file=True)
+                    result_dict["content"] = redact_sensitive_text(result_dict["content"], file_read=True)
                 return json.dumps(result_dict, ensure_ascii=False)
 
         # ── Binary file guard ─────────────────────────────────────────
@@ -944,21 +968,23 @@ def read_file_tool(path: str, offset: int = 1, limit: int = 500, task_id: str = 
         max_chars = _get_max_read_chars()
         if content_len > max_chars:
             total_lines = result_dict.get("total_lines", "unknown")
-            return json.dumps({
-                "error": (
-                    f"Read produced {content_len:,} characters which exceeds "
-                    f"the safety limit ({max_chars:,} chars). "
-                    "Use offset and limit to read a smaller range. "
-                    f"The file has {total_lines} lines total."
-                ),
-                "path": path,
-                "total_lines": total_lines,
-                "file_size": file_size,
-            }, ensure_ascii=False)
+            trimmed, lines_kept, _ = _truncate_to_char_budget(result.content or "", max_chars)
+            next_offset = offset + lines_kept
+            shown_end = offset + lines_kept - 1
+            result.content = trimmed
+            result_dict["content"] = trimmed
+            result_dict["truncated"] = True
+            result_dict["truncated_by"] = "bytes"
+            result_dict["next_offset"] = next_offset
+            result_dict["hint"] = (
+                f"Output truncated at the {max_chars:,}-char read budget after "
+                f"{lines_kept} line(s) (showing lines {offset}-{shown_end} of "
+                f"{total_lines}). Use offset={next_offset} to continue."
+            )
 
         # ── Redact secrets (after guard check to skip oversized content) ──
         if result.content:
-            result.content = redact_sensitive_text(result.content, code_file=True)
+            result.content = redact_sensitive_text(result.content, file_read=True)
             result_dict["content"] = result.content
 
         # Large-file hint: if the file is big and the caller didn't ask
@@ -1477,7 +1503,7 @@ def search_tool(pattern: str, target: str = "content", path: str = ".",
         if hasattr(result, 'matches'):
             for m in result.matches:
                 if hasattr(m, 'content') and m.content:
-                    m.content = redact_sensitive_text(m.content, code_file=True)
+                    m.content = redact_sensitive_text(m.content, file_read=True)
         result_dict = result.to_dict(densify=True)
 
         if count >= 3:
@@ -1512,7 +1538,7 @@ def _check_file_reqs():
 
 READ_FILE_SCHEMA = {
     "name": "read_file",
-    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Reads exceeding ~100K characters are rejected; use offset and limit to read specific sections of large files. Jupyter notebooks (.ipynb), Word documents (.docx), and Excel workbooks (.xlsx) are auto-extracted to readable text. NOTE: Cannot read images or other binary files — use vision_analyze for images.",
+    "description": "Read a text file with line numbers and pagination. Use this instead of cat/head/tail in terminal. Output format: 'LINE_NUM|CONTENT'. Suggests similar filenames if not found. Use offset and limit for large files. Oversized reads are truncated with next_offset so you can continue reading the file. Jupyter notebooks (.ipynb), Word documents (.docx), and Excel workbooks (.xlsx) are auto-extracted to readable text. NOTE: Cannot read images or other binary files — use vision_analyze for images.",
     "parameters": {
         "type": "object",
         "properties": {

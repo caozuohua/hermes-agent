@@ -39,6 +39,20 @@ For tools, do not count imported modules. Count what the model actually sees:
 
 ```bash
 export HERMES_HOME=/home/caozuohua99/.hermes-lite
+hermes tools budget-check --platform feishu --max-tools 1
+```
+
+For a JSON report suitable for CI or a lightweight deploy check:
+
+```bash
+export HERMES_HOME=/home/caozuohua99/.hermes-lite
+hermes tools budget-check --platform feishu --max-tools 1 --json
+```
+
+The lower-level runtime probe is:
+
+```bash
+export HERMES_HOME=/home/caozuohua99/.hermes-lite
 set -a
 . /home/caozuohua99/.hermes-lite/.env
 . /home/caozuohua99/.hermes-lite/.env.lark
@@ -49,8 +63,13 @@ cd /home/caozuohua99/.hermes-lite/hermes-agent
 import os, yaml
 os.environ["HERMES_HOME"] = "/home/caozuohua99/.hermes-lite"
 from model_tools import get_tool_definitions
+from hermes_cli.tools_config import _get_platform_tools
 cfg = yaml.safe_load(open("/home/caozuohua99/.hermes-lite/config.yaml")) or {}
-tools = get_tool_definitions(enabled_toolsets=cfg.get("toolsets"), quiet_mode=True)
+tools = get_tool_definitions(
+    enabled_toolsets=sorted(_get_platform_tools(cfg, "feishu")),
+    disabled_toolsets=(cfg.get("agent") or {}).get("disabled_toolsets"),
+    quiet_mode=True,
+)
 names = sorted(t.get("function", {}).get("name") for t in tools if t.get("function"))
 print(len(names), names)
 PY

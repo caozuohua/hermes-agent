@@ -408,3 +408,42 @@ class TestCoerceToolArgs:
         assert isinstance(result["offset"], int)
         assert result["limit"] == 100
         assert isinstance(result["limit"], int)
+
+    def test_array_elements_as_json_strings_are_parsed_by_schema(self):
+        schema = self._mock_schema({
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {
+                        "id": {"type": "string"},
+                        "content": {"type": "string"},
+                    },
+                },
+            },
+        })
+        with patch("model_tools.registry.get_schema", return_value=schema):
+            result = coerce_tool_args(
+                "test_tool",
+                {"items": ['{"id": "1", "content": "x"}']},
+            )
+
+        assert result["items"] == [{"id": "1", "content": "x"}]
+
+    def test_json_looking_string_subfield_is_preserved(self):
+        schema = self._mock_schema({
+            "items": {
+                "type": "array",
+                "items": {
+                    "type": "object",
+                    "properties": {"content": {"type": "string"}},
+                },
+            },
+        })
+        with patch("model_tools.registry.get_schema", return_value=schema):
+            result = coerce_tool_args(
+                "test_tool",
+                {"items": [{"content": '{"not": "parsed"}'}]},
+            )
+
+        assert result["items"][0]["content"] == '{"not": "parsed"}'
