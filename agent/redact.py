@@ -30,6 +30,8 @@ _SENSITIVE_QUERY_PARAMS = frozenset({
     "session",
     "secret",
     "key",
+    "access_key",
+    "ticket",
     "code",           # OAuth authorization codes
     "signature",      # pre-signed URL signatures
     "x-amz-signature",
@@ -335,6 +337,34 @@ def _redact_url_query_params(text: str) -> str:
     return _URL_WITH_QUERY_RE.sub(_sub, text)
 
 
+def _redact_lark_ws_query_params(text: str) -> str:
+    """Redact Lark/Feishu SDK websocket connection credentials.
+
+    Hermes intentionally does not redact arbitrary web URL query strings
+    because users often need the agent to follow magic links, OAuth callbacks,
+    and signed URLs.  The Lark SDK logs its msg-frontier websocket URL at INFO
+    level, though, and that URL contains reusable connection credentials such
+    as ``access_key`` and ``ticket``.  Keep this rule narrowly scoped to the
+    SDK websocket host/path so ordinary user-facing URLs keep passing through.
+    """
+    def _sub(m: re.Match) -> str:
+        scheme = m.group(1)
+        authority = m.group(2)
+        path = m.group(3)
+        query = m.group(4)
+        fragment = m.group(5) or ""
+        host = authority.rsplit("@", 1)[-1].split(":", 1)[0].lower()
+        if scheme.lower() not in {"ws", "wss"}:
+            return m.group(0)
+        if not (host == "msg-frontier.larksuite.com" or host.startswith("msg-frontier-")):
+            return m.group(0)
+        if not path.startswith("/ws"):
+            return m.group(0)
+        return f"{scheme}://{authority}{path}?{_redact_query_string(query)}{fragment}"
+
+    return _URL_WITH_QUERY_RE.sub(_sub, text)
+
+
 def _redact_url_userinfo(text: str) -> str:
     """Strip `user:password@` from HTTP/WS/FTP URLs.
 
@@ -496,6 +526,11 @@ def redact_sensitive_text(
     # Known credential shapes (sk-, ghp_, JWTs, etc.) inside URLs are still
     # caught by _PREFIX_RE and _JWT_RE above. DB connection-string passwords
     # are still caught by _DB_CONNSTR_RE.
+    #
+    # Narrow exception: lark-oapi logs its msg-frontier websocket URL including
+    # access_key/ticket credentials.  Redact those SDK connection URLs only.
+    if "msg-frontier" in text and ("access_key=" in text or "ticket=" in text):
+        text = _redact_lark_ws_query_params(text)
 
     # Form-urlencoded bodies (only triggers on clean k=v&k=v inputs).
     if "&" in text and "=" in text:

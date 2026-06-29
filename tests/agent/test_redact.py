@@ -407,6 +407,21 @@ class TestWebUrlsNotRedacted:
         text = "wss://api.example.com/ws?token=opaqueWsToken123"
         assert redact_sensitive_text(text) == text
 
+    def test_lark_sdk_websocket_credentials_are_redacted(self):
+        text = (
+            "[Lark] connected to "
+            "wss://msg-frontier-sg.larksuite.com/ws/v2?"
+            "fpid=493&aid=552564&device_id=7656652587354361564&"
+            "access_key=488cce84fa28cdbe8fe9b9e1edd066ae&"
+            "service_id=33554678&ticket=814d4385-52e9-4c6a-a9e5-912dd6a41e89"
+        )
+        result = redact_sensitive_text(text)
+        assert "488cce84fa28cdbe8fe9b9e1edd066ae" not in result
+        assert "814d4385-52e9-4c6a-a9e5-912dd6a41e89" not in result
+        assert "access_key=***" in result
+        assert "ticket=***" in result
+        assert "device_id=7656652587354361564" in result
+
     def test_http_access_log_request_target_passes_through(self):
         text = (
             'INFO aiohttp.access: 127.0.0.1 "POST '
