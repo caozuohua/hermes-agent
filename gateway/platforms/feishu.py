@@ -4584,7 +4584,10 @@ class FeishuAdapter(BasePlatformAdapter):
         self._ws_client = FeishuWSClient(
             app_id=self._app_id,
             app_secret=self._app_secret,
-            log_level=lark.LogLevel.INFO,
+            # lark-oapi INFO logs include the raw websocket connection URL,
+            # including access_key/ticket query credentials. Keep SDK logs at
+            # WARNING; Hermes emits its own adapter status logs separately.
+            log_level=lark.LogLevel.WARNING,
             event_handler=self._event_handler,
             domain=domain,
         )
