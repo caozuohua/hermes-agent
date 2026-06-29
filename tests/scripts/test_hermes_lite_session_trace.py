@@ -2,7 +2,10 @@ import sqlite3
 from pathlib import Path
 
 from scripts.hermes_lite_session_trace import (
+    MessageRow,
+    clean_text,
     connect_readonly,
+    extract_error_hint,
     fetch_messages,
     fetch_session,
     list_sessions,
@@ -213,3 +216,25 @@ def test_list_sessions_uses_mobile_blocks(tmp_path):
     assert "`s_latest`" in out
     assert "`s_old`" in out
     assert "|" not in out
+
+
+def test_error_hint_ignores_successful_tool_json_noise():
+    message = MessageRow(
+        id=99,
+        role="tool",
+        content='{"output":"HTTP/2 200 ok\\n<span class=\\"text-secondary\\">ready</span>","exit_code":0,"error":null}',
+        tool_call_id="call_ok",
+        tool_calls="",
+        tool_name="terminal",
+        timestamp=2005.0,
+        token_count=0,
+        finish_reason="",
+        reasoning="",
+        reasoning_content="",
+    )
+
+    assert extract_error_hint(message) == ""
+
+
+def test_clean_text_normalizes_markdown_rule_for_lark():
+    assert clean_text("before\n---\nafter", 200) == "before\n—\nafter"

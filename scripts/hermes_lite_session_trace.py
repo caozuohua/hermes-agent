@@ -10,6 +10,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import re
 import sqlite3
 import sys
 import textwrap
@@ -33,9 +34,6 @@ ROLE_LABELS = {
 }
 
 ERROR_MARKERS = (
-    "error",
-    "exception",
-    "traceback",
     "http 400",
     "http 401",
     "http 403",
@@ -45,7 +43,11 @@ ERROR_MARKERS = (
     "http 502",
     "http 503",
     "rate limited",
-    "failed",
+    "❌",
+)
+ERROR_WORD_RE = re.compile(
+    r"\b(?:error|exception|traceback|failed|failure|denied|timeout|timed out)\b",
+    re.IGNORECASE,
 )
 
 
@@ -201,7 +203,10 @@ def fmt_time(value: float | int | None) -> str:
 def clean_text(text: str, max_chars: int) -> str:
     text = redact_sensitive_text(text or "", force=True)
     text = text.replace("\r\n", "\n").replace("\r", "\n")
-    lines = [line.rstrip() for line in text.splitlines()]
+    lines = [
+        ("—" if line.strip() == "---" else line.rstrip())
+        for line in text.splitlines()
+    ]
     text = "\n".join(lines).strip()
     if len(text) > max_chars:
         text = text[: max(0, max_chars - 20)].rstrip() + "\n...[truncated]"
@@ -258,15 +263,22 @@ def extract_error_hint(message: MessageRow) -> str:
             if isinstance(value, str) and value.strip():
                 if key == "status" and value.lower() not in {"error", "failed"}:
                     continue
+                if key == "message" and not has_error_marker(value):
+                    continue
                 return value.strip()
         nested = parsed.get("output")
-        if isinstance(nested, str) and any(m in nested.lower() for m in ERROR_MARKERS):
+        if isinstance(nested, str) and has_error_marker(nested):
             return nested.strip()
-    lowered = content.lower()
-    if any(marker in lowered for marker in ERROR_MARKERS):
+        return ""
+    if has_error_marker(content):
         first = next((line.strip() for line in content.splitlines() if line.strip()), content)
         return first
     return ""
+
+
+def has_error_marker(text: str) -> bool:
+    lowered = (text or "").lower()
+    return any(marker in lowered for marker in ERROR_MARKERS) or bool(ERROR_WORD_RE.search(text or ""))
 
 
 def rough_tokens(messages: list[MessageRow], session: SessionRow) -> int:
