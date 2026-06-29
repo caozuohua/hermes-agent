@@ -27,6 +27,12 @@ class TestMemorySchema:
         assert "todo state" in description
         assert ">80%" not in description
 
+    def test_near_full_guidance_prefers_atomic_operations(self):
+        description = MEMORY_SCHEMA["description"].lower()
+        assert "operations" in description
+        assert "25-35% headroom" in description
+        assert "do not keep retrying plain add" in description
+
 
 # =========================================================================
 # Security scanning
@@ -300,6 +306,9 @@ class TestMemoryStoreAdd:
         # Overflow response gives the model what it needs to consolidate in-turn
         assert "current_entries" in result
         assert "usage" in result
+        assert result["next_action"] == "consolidate_with_operations"
+        assert "operations=[...]" in result["error"]
+        assert "25-35% headroom" in result["error"]
         assert "retry" in result["error"].lower()
 
     def test_replace_exceeding_limit_returns_consolidation_context(self, store):
@@ -310,6 +319,9 @@ class TestMemoryStoreAdd:
         assert result["success"] is False
         assert "current_entries" in result
         assert "usage" in result
+        assert result["next_action"] == "consolidate_with_operations"
+        assert "operations=[...]" in result["error"]
+        assert "25-35% headroom" in result["error"]
         assert "retry" in result["error"].lower()
 
     def test_add_injection_blocked(self, store):

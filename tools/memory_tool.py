@@ -57,6 +57,12 @@ def get_memory_dir() -> Path:
     return get_hermes_home() / "memories"
 
 ENTRY_DELIMITER = "\n§\n"
+MEMORY_HEADROOM_HINT = (
+    "Use one memory call with operations=[...] to consolidate atomically: "
+    "remove stale entries first, replace overlapping entries with one shorter "
+    "merged entry, then add only if the final total leaves 25-35% headroom. "
+    "Do not retry plain add after a limit error."
+)
 
 
 # ---------------------------------------------------------------------------
@@ -332,13 +338,12 @@ class MemoryStore:
                     "error": (
                         f"Memory at {current:,}/{limit:,} chars. "
                         f"Adding this entry ({len(content)} chars) would exceed the limit. "
-                        f"Consolidate now instead of retrying add: use one memory call with "
-                        f"the operations array to remove stale entries and/or replace "
-                        f"overlapping entries with one shorter merged entry. Keep durable "
-                        f"preferences/facts only; move procedures to skills or docs."
+                        f"Consolidate now instead of retrying add. {MEMORY_HEADROOM_HINT} "
+                        f"Keep durable preferences/facts only; move procedures to skills or docs."
                     ),
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
+                    "next_action": "consolidate_with_operations",
                 }
 
             entries.append(content)
@@ -398,14 +403,13 @@ class MemoryStore:
                     "success": False,
                     "error": (
                         f"Replacement would put memory at {new_total:,}/{limit:,} chars. "
-                        f"Shorten the replacement, or use one memory call with the operations "
-                        f"array to remove stale entries and replace overlapping entries with "
-                        f"one shorter merged entry. Retry only with operations, not a plain "
-                        f"add. Keep durable preferences/facts only; move "
+                        f"Shorten the replacement. {MEMORY_HEADROOM_HINT} "
+                        f"Keep durable preferences/facts only; move "
                         f"procedures to skills or docs."
                     ),
                     "current_entries": entries,
                     "usage": f"{current:,}/{limit:,}",
+                    "next_action": "consolidate_with_operations",
                 }
 
             entries[idx] = new_content
@@ -562,11 +566,11 @@ class MemoryStore:
                     "success": False,
                     "error": (
                         f"Batch would exceed the memory limit at {final_total:,}/{limit:,} chars. "
-                        "Make the replacement shorter or remove more stale entries in the same "
-                        "operations array; do not retry with a plain add."
+                        f"Make the replacement shorter or remove more stale entries. {MEMORY_HEADROOM_HINT}"
                     ),
                     "current_entries": original_entries,
                     "usage": f"{current:,}/{limit:,}",
+                    "next_action": "consolidate_with_operations",
                 }
 
             self._set_entries(target, entries)

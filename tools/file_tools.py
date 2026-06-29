@@ -1542,7 +1542,11 @@ READ_FILE_SCHEMA = {
     "parameters": {
         "type": "object",
         "properties": {
-            "path": {"type": "string", "description": "Path to the file to read (absolute, relative, or ~/path)"},
+            "path": {
+                "type": "string",
+                "minLength": 1,
+                "description": "Path to the file to read (absolute, relative, or ~/path). Must be non-empty; use search_files first if unsure.",
+            },
             "offset": {"type": "integer", "description": "Line number to start reading from (1-indexed, default: 1)", "default": 1, "minimum": 1},
             "limit": {"type": "integer", "description": "Maximum number of lines to read (default: 500, max: 2000)", "default": 500, "maximum": 2000}
         },
@@ -1641,7 +1645,14 @@ SEARCH_FILES_SCHEMA = {
 
 def _handle_read_file(args, **kw):
     tid = kw.get("task_id") or "default"
-    return read_file_tool(path=args.get("path", ""), offset=args.get("offset", 1), limit=args.get("limit", 500), task_id=tid)
+    path = args.get("path")
+    if not isinstance(path, str) or not path.strip():
+        return tool_error(
+            "read_file: missing required field 'path'. Re-emit the tool call with a non-empty "
+            "path. If you do not know the path yet, call search_files with target='files' "
+            "or inspect the current directory first."
+        )
+    return read_file_tool(path=path, offset=args.get("offset", 1), limit=args.get("limit", 500), task_id=tid)
 
 
 def _handle_write_file(args, **kw):

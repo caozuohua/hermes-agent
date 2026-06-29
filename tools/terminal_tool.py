@@ -1890,7 +1890,24 @@ def terminal_tool(
             return json.dumps({
                 "output": "",
                 "exit_code": -1,
-                "error": f"Invalid command: expected string, got {type(command).__name__}",
+                "error": (
+                    f"Invalid command: expected a non-empty string, got {type(command).__name__}. "
+                    "Re-emit the terminal tool call with command set to a complete shell command. "
+                    "If you are unsure what to run, inspect the workspace first with "
+                    "search_files/read_file or run a simple discovery command such as 'pwd && ls'."
+                ),
+                "status": "error",
+            }, ensure_ascii=False)
+        if not command.strip():
+            logger.warning("Rejected empty terminal command value")
+            return json.dumps({
+                "output": "",
+                "exit_code": -1,
+                "error": (
+                    "Invalid command: command cannot be empty. Re-emit the terminal tool call "
+                    "with a complete shell command, or inspect the workspace first with "
+                    "search_files/read_file."
+                ),
                 "status": "error",
             }, ensure_ascii=False)
 
@@ -2658,6 +2675,7 @@ TERMINAL_SCHEMA = {
         "properties": {
             "command": {
                 "type": "string",
+                "minLength": 1,
                 "description": "The command to execute on the VM"
             },
             "background": {
