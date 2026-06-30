@@ -40,6 +40,7 @@ Payment / credit exhaustion fallback:
   their OpenRouter balance but has Codex OAuth or another provider available.
 """
 
+import contextlib
 import json
 import logging
 import os
@@ -105,6 +106,65 @@ from hermes_constants import OPENROUTER_BASE_URL
 from utils import base_url_host_matches, base_url_hostname, model_forces_max_completion_tokens, normalize_proxy_env_vars
 
 logger = logging.getLogger(__name__)
+
+
+def _openai_http_client_kwargs(
+    base_url: Optional[str],
+    *,
+    async_mode: bool = False,
+) -> Dict[str, Any]:
+    """Inject keepalive httpx client with env-only proxy (not macOS system proxy)."""
+    client = build_keepalive_http_client(str(base_url or ""), async_mode=async_mode)
+    if client is None:
+        return {}
+    return {"http_client": client}
+
+
+def _create_openai_client(*, api_key: str, base_url: str, **kwargs: Any) -> Any:
+    kwargs = {**_openai_http_client_kwargs(base_url), **kwargs}
+    # Hermes owns auxiliary retry + provider/model fallback policy (the
+    # same-provider transient retry in call_llm plus the except-chain
+    # fallback). The OpenAI SDK's own default (max_retries=2 → up to 3
+    # attempts) silently multiplies the effective wall time of every aux call
+    # by 3× on a slow/hung endpoint, so a 120s timeout can stall ~360s before
+    # Hermes sees a single failure (issue #54465). Disable SDK-internal retries
+    # by default and let Hermes control the budget; explicit callers can still
+    # override via kwargs.
+    kwargs.setdefault("max_retries", 0)
+    return OpenAI(api_key=api_key, base_url=base_url, **kwargs)
+
+
+# ── Interrupt protection for atomic auxiliary tasks ──────────────────────
+# Some auxiliary tasks must NOT be aborted mid-flight by a gateway interrupt
+# (e.g. an incoming user message while the agent is busy). Context
+# compression is the prime case: if the summary LLM call is interrupted
+# part-way, compression falls back to a static "summary unavailable" marker
+# and the real handoff is lost (#23975). A thread-local flag lets such a
+# task mark its in-flight LLM call as interrupt-protected; the Codex
+# Responses stream's cancellation check honors it. TIMEOUTS still fire
+# (a hung call must die), and all OTHER aux tasks (vision, web_extract,
+# title_generation, …) remain freely interruptible.
+_aux_interrupt_protection = threading.local()
+
+
+def _aux_interrupt_protected() -> bool:
+    return bool(getattr(_aux_interrupt_protection, "active", False))
+
+
+@contextlib.contextmanager
+def aux_interrupt_protection(active: bool = True):
+    """Mark the current thread's auxiliary LLM call as interrupt-protected.
+
+    Used by atomic aux tasks (compression) so a mid-flight gateway interrupt
+    doesn't abort the call and trigger a degraded fallback. Re-entrant-safe:
+    restores the previous value on exit.
+    """
+    prev = getattr(_aux_interrupt_protection, "active", False)
+    _aux_interrupt_protection.active = active
+    try:
+        yield
+    finally:
+        _aux_interrupt_protection.active = prev
 
 
 def _safe_isinstance(obj: Any, maybe_type: Any) -> bool:
@@ -2462,6 +2522,27 @@ def _is_rate_limit_error(exc: Exception) -> bool:
     return False
 
 
+def _is_timeout_error(exc: Exception) -> bool:
+    """Detect a request timeout — the full-budget stall, distinct from a fast
+    connection drop.
+
+    A timeout burns the entire configured ``timeout`` before surfacing, so a
+    same-provider retry on the critical compression path doubles the
+    user-visible wall time (issue #54465). A streaming-close / dropped
+    connection, by contrast, fails fast and is cheap to retry — those stay on
+    the retry path even for compression.
+    """
+    try:
+        from openai import APITimeoutError
+        if isinstance(exc, APITimeoutError):
+            return True
+    except ImportError:
+        pass
+    if "Timeout" in type(exc).__name__:
+        return True
+    return "timed out" in str(exc).lower()
+
+
 def _is_connection_error(exc: Exception) -> bool:
     """Detect connection/network errors that warrant provider fallback.
 
@@ -3465,6 +3546,13 @@ def _to_async_client(sync_client, model: str, is_vision: bool = False):
     _merged_async = _apply_user_default_headers(async_kwargs.get("default_headers"))
     if _merged_async:
         async_kwargs["default_headers"] = _merged_async
+    async_kwargs = {
+        **_openai_http_client_kwargs(sync_base_url, async_mode=True),
+        **async_kwargs,
+    }
+    # See _create_openai_client: disable SDK-internal retries so Hermes owns
+    # the auxiliary retry/timeout budget (issue #54465).
+    async_kwargs.setdefault("max_retries", 0)
     return AsyncOpenAI(**async_kwargs), model
 
 
@@ -5397,6 +5485,21 @@ def call_llm(
         except Exception as transient_err:
             if not _is_transient_transport_error(transient_err):
                 raise
+            # Compression is on the critical preflight path: a user cannot
+            # continue or resume an oversized session until it compacts. A
+            # same-provider retry on a timeout means another full ``timeout``-
+            # long wall-clock block before the except-chain below can fall
+            # back — doubling the user-visible stall (issue #54465). Skip the
+            # same-provider retry for compression on a full-budget timeout and
+            # fall straight through to provider/model fallback; fast blips (a
+            # streaming-close or a 5xx) still retry, since those are cheap.
+            if task == "compression" and _is_timeout_error(transient_err):
+                logger.info(
+                    "Auxiliary compression: timeout on the critical path; "
+                    "skipping same-provider retry and falling back: %s",
+                    transient_err,
+                )
+                raise
             logger.info(
                 "Auxiliary %s: transient transport error; retrying once on "
                 "the same provider before fallback: %s",
@@ -5889,6 +5992,16 @@ async def async_call_llm(
                 await client.chat.completions.create(**kwargs), task)
         except Exception as transient_err:
             if not _is_transient_transport_error(transient_err):
+                raise
+            # See call_llm(): compression is on the critical preflight path,
+            # so skip the same-provider retry on a full-budget timeout and
+            # fall straight through to fallback (issue #54465).
+            if task == "compression" and _is_timeout_error(transient_err):
+                logger.info(
+                    "Auxiliary compression (async): timeout on the critical "
+                    "path; skipping same-provider retry and falling back: %s",
+                    transient_err,
+                )
                 raise
             logger.info(
                 "Auxiliary %s (async): transient transport error; retrying "
