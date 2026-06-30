@@ -751,7 +751,58 @@ class SessionStore:
                 print(f"[gateway] Warning: Failed to load sessions: {e}")
 
         self._loaded = True
-    
+
+        # Prune any sessions.json entries that point to sessions already ended
+        # in state.db. A hard gateway crash (exit code 1) skips the graceful
+        # shutdown path, so sessions.json is never cleared and is left pointing
+        # at ended sessions. On the next startup those stale entries act as live
+        # routing keys. get_or_create_session() only consulted end_reason at
+        # startup (here) until #54878 added a routing-time guard for the
+        # live-gateway case; this startup prune still self-heals crash-left
+        # entries before the first message arrives. Pruning here (lock already
+        # held) is cheap: one lookup per routing key, once at startup.
+        self._prune_stale_sessions_locked()
+
+    def _prune_stale_sessions_locked(self) -> None:
+        """Remove sessions.json entries whose session has ended in state.db.
+
+        Called once during startup (from ``_ensure_loaded_locked``, lock held).
+        A ``session_id`` is stale when state.db reports ``end_reason IS NOT
+        NULL`` for it. Sessions absent from the DB (never persisted / pre-SQLite
+        legacy) are left alone, and a ``None`` DB handle (SQLite unavailable) is
+        a no-op. DB errors are non-fatal — startup must never fail here.
+        """
+        db = getattr(self, "_db", None)
+        if not db or not self._entries:
+            return
+
+        stale_keys: list = []
+        try:
+            for key, entry in self._entries.items():
+                row = db.get_session(entry.session_id)
+                # row is None        -> not in DB (legacy / pre-SQLite) — keep
+                # end_reason is None  -> session alive — keep
+                # end_reason not None -> session ended — prune
+                if row is not None and row.get("end_reason") is not None:
+                    logger.warning(
+                        "gateway.session: pruning stale sessions.json entry "
+                        "%r -> %s (end_reason=%r); left by a crashed gateway",
+                        key, entry.session_id, row["end_reason"],
+                    )
+                    stale_keys.append(key)
+        except Exception as exc:
+            logger.warning(
+                "gateway.session: stale-entry pruning skipped due to DB error: %s",
+                exc,
+            )
+            return
+
+        for key in stale_keys:
+            del self._entries[key]
+
+        if stale_keys:
+            self._save()
+
     def _save(self) -> None:
         """Save sessions index to disk (kept for session key -> ID mapping)."""
         import tempfile
@@ -908,6 +959,32 @@ class SessionStore:
 
         return False
 
+    def _is_session_ended_in_db(self, session_id: str) -> bool:
+        """Return True iff state.db has this session with a non-null end_reason.
+
+        Mirrors the staleness test in ``_prune_stale_sessions_locked``:
+          - no DB handle / no session_id -> False (can't tell — keep)
+          - row absent (legacy / not yet persisted) -> False (keep)
+          - end_reason is None -> False (alive — keep)
+          - end_reason not None -> True (ended — stale)
+
+        Used by ``get_or_create_session`` to self-heal at routing time:
+        ``_prune_stale_sessions_locked`` only runs at startup, so a session
+        ended in the DB while the gateway stays alive (any path that finalizes
+        the row without clearing sessions.json) would otherwise be reused as a
+        live routing key and silently swallow every subsequent message until
+        the next restart (#54878 — the live-gateway variant of #52804/FM9).
+        DB errors are non-fatal — never block routing on a failed lookup.
+        """
+        db = getattr(self, "_db", None)
+        if not db or not session_id:
+            return False
+        try:
+            row = db.get_session(session_id)
+        except Exception:
+            return False
+        return bool(row is not None and row.get("end_reason") is not None)
+
     def _should_reset(self, entry: SessionEntry, source: SessionSource) -> Optional[str]:
         """
         Check if a session should be reset based on policy.
@@ -999,36 +1076,73 @@ class SessionStore:
             if session_key in self._entries and not force_new:
                 entry = self._entries[session_key]
 
-                # Auto-reset sessions marked as suspended (e.g. after /stop
-                # broke a stuck loop — #7536).  ``suspended`` is the hard
-                # forced-wipe signal and always wins over ``resume_pending``,
-                # so repeated interrupted restarts that escalate via the
-                # existing ``.restart_failure_counts`` stuck-loop counter
-                # still converge to a clean slate.
-                if entry.suspended:
-                    reset_reason = "suspended"
-                elif entry.resume_pending:
-                    # Restart-interrupted session: preserve the session_id
-                    # and return the existing entry so the transcript reloads
-                    # intact, but still honour normal daily/idle reset policy.
-                    reset_reason = self._should_reset(entry, source)
+                # Self-heal stale routing: if this session_key still points at
+                # a session that has ALREADY been ended in state.db (end_reason
+                # set), the in-memory sessions.json entry is stale.  Reusing it
+                # would route every incoming message into a closed session and
+                # silently drop it — with no log, no error, no response — until
+                # the gateway restarts and _prune_stale_sessions_locked() clears
+                # it (#54878 — the live-gateway variant of #52804/FM9, which
+                # only the startup prune previously caught).
+                #
+                # Drop the stale entry and fall through to the recovery path
+                # below.  Leaving db_end_session_id None routes us into
+                # _recover_session_from_db, whose finder
+                # (hermes_state.find_latest_gateway_session_for_peer) selects
+                # rows WHERE `ended_at IS NULL OR end_reason = 'agent_close'`
+                # — so it REOPENS gateway-cleanup-ended ('agent_close') rows and
+                # resumes the SAME session_id (transcript preserved), but returns
+                # None for any other end_reason (e.g. /new), which then correctly
+                # starts a fresh session.
+                if self._is_session_ended_in_db(entry.session_id):
+                    logger.warning(
+                        "gateway.session: routing key %r -> %s is ended in "
+                        "state.db but still live in sessions.json; dropping "
+                        "stale entry and recovering/recreating the session "
+                        "(#54878)",
+                        session_key, entry.session_id,
+                    )
+                    self._entries.pop(session_key, None)
+                    was_auto_reset = False
+                    auto_reset_reason = None
+                    reset_had_activity = False
+                    # Fall through to the recovery/create path below; the
+                    # stale entry is gone so we must NOT consult its
+                    # suspended/resume/reset state.
+                else:
+                    # Auto-reset sessions marked as suspended (e.g. after /stop
+                    # broke a stuck loop — #7536).  ``suspended`` is the hard
+                    # forced-wipe signal and always wins over ``resume_pending``,
+                    # so repeated interrupted restarts that escalate via the
+                    # existing ``.restart_failure_counts`` stuck-loop counter
+                    # still converge to a clean slate.
+                    if entry.suspended:
+                        reset_reason = "suspended"
+                    elif entry.resume_pending:
+                        # Restart-interrupted session: preserve the session_id
+                        # and return the existing entry so the transcript reloads
+                        # intact, but still honour normal daily/idle reset policy.
+                        reset_reason = self._should_reset(entry, source)
+                        if not reset_reason:
+                            entry.updated_at = now
+                            self._save()
+                            return entry
+                    else:
+                        reset_reason = self._should_reset(entry, source)
                     if not reset_reason:
                         entry.updated_at = now
                         self._save()
                         return entry
-                else:
-                    reset_reason = self._should_reset(entry, source)
-                if not reset_reason:
-                    entry.updated_at = now
-                    self._save()
-                    return entry
-                else:
-                    # Session is being auto-reset.
-                    was_auto_reset = True
-                    auto_reset_reason = reset_reason
-                    # Track whether the expired session had any real conversation
-                    reset_had_activity = entry.total_tokens > 0
-                    db_end_session_id = entry.session_id
+                    else:
+                        # Session is being auto-reset.
+                        was_auto_reset = True
+                        auto_reset_reason = reset_reason
+                        # Track whether the expired session had any real
+                        # conversation.  total_tokens is never written (token
+                        # counts migrated to agent-direct persistence) so it is
+                        # always 0 — use last_prompt_tokens, updated every turn.
+                        reset_had_activity = entry.last_prompt_tokens > 0
+                        db_end_session_id = entry.session_id
             else:
                 was_auto_reset = False
                 auto_reset_reason = None
