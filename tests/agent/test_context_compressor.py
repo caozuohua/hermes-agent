@@ -7,6 +7,7 @@ from agent.context_compressor import (
     ContextCompressor,
     HISTORICAL_TASK_HEADING,
     SUMMARY_PREFIX,
+    _summarize_tool_result,
 )
 
 
@@ -40,6 +41,17 @@ class TestShouldCompress:
     def test_explicit_tokens(self, compressor):
         assert compressor.should_compress(prompt_tokens=90000) is True
         assert compressor.should_compress(prompt_tokens=50000) is False
+
+
+class TestToolResultSummary:
+    def test_write_file_dict_content_does_not_crash(self):
+        summary = _summarize_tool_result(
+            "write_file",
+            '{"path": "notes.json", "content": {"title": "ok", "items": [1, 2]}}',
+            '{"success": true}',
+        )
+
+        assert summary == "[write_file] wrote to notes.json (1 lines)"
 
 
 

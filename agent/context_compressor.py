@@ -40,6 +40,18 @@ HISTORICAL_PENDING_ASKS_HEADING = "## Historical Pending User Asks"
 HISTORICAL_REMAINING_WORK_HEADING = "## Historical Remaining Work"
 
 
+def _coerce_summary_text(value: Any) -> str:
+    """Return stable text for compression summaries from loose tool payloads."""
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    try:
+        return json.dumps(value, ensure_ascii=False, sort_keys=True)
+    except (TypeError, ValueError):
+        return str(value)
+
+
 SUMMARY_PREFIX = (
     "[CONTEXT COMPACTION — REFERENCE ONLY] Earlier turns were compacted "
     "into the summary below. This is a handoff from a previous context "
@@ -486,7 +498,7 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
     except (json.JSONDecodeError, TypeError):
         args = {}
 
-    content = tool_content or ""
+    content = _coerce_summary_text(tool_content)
     content_len = len(content)
     line_count = content.count("\n") + 1 if content.strip() else 0
 
@@ -505,7 +517,8 @@ def _summarize_tool_result(tool_name: str, tool_args: str, tool_content: str) ->
 
     if tool_name == "write_file":
         path = args.get("path", "?")
-        written_lines = args.get("content", "").count("\n") + 1 if args.get("content") else "?"
+        write_content = args.get("content")
+        written_lines = _coerce_summary_text(write_content).count("\n") + 1 if write_content else "?"
         return f"[write_file] wrote to {path} ({written_lines} lines)"
 
     if tool_name == "search_files":
