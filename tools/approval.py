@@ -257,11 +257,54 @@ _CMDPOS = (
     r'\s*'
 )
 
+# Destructive-path argument matcher for the rm hardline rules.
+#
+# The path token in `rm -rf /` is almost always written quoted in real
+# shells — `rm -rf "/"`, `rm -rf "$HOME"` — and `${HOME}` is the universal
+# brace form. A bare-token anchor (`(/...)(\s|$)`) silently misses all of
+# these: the surrounding quote breaks both the leading position (the flag
+# group can't consume `"`) and the trailing `(\s|$)` terminator, letting
+# `rm -rf "/"` slip past the unconditional floor entirely.
+#
+# Accept the path either fully wrapped in a matching quote pair OR bare with
+# a terminator. The matching-quote branch catches `rm -rf "/"` (path quoted
+# on its own). The bare branch's terminator accepts whitespace, end-of-string
+# OR a shell metacharacter (`) ` ; | &`) so a real root wipe inside a command
+# substitution — `$(rm -rf /)`, `` `rm -rf /` `` — whose `/` is terminated by
+# `)`/backtick is still caught.
+def _hardline_rm_path(path_alt: str, tail: str = r'(?:\s|$|[)`;|&])') -> str:
+    return rf'(?:["\'](?:{path_alt})["\']|(?:{path_alt}){tail})'
+
+
+# Protected system roots whose recursive deletion has no recovery path.
+_HARDLINE_SYSTEM_DIRS = (
+    r'/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|'
+    r'/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*'
+)
+
+# `rm` plus its flag group, shared by the three rm hardline rules. Kept as a
+# plain concatenation (not an f-string) so the regex backslashes never live
+# inside an f-string replacement field — unsupported on the Python 3.11 floor.
+#
+# Anchored to _CMDPOS (start of line, after a command separator ; && || |,
+# after a subshell opener $(/backtick, or after sudo/env/exec wrappers) so the
+# rule fires only when `rm` is an actual command word — not when the literal
+# string "rm -rf /" appears as DATA inside another command's argument, e.g.
+# `gh pr create --title "block rm -rf / spellings"` or `git commit -m "…rm -rf
+# /…"`. Those tripped the unconditional floor and could not run at all before
+# the anchor. A real wipe at any command position (bare, chained, in $()/`…`,
+# under sudo) still matches; the quoted-path branch in _hardline_rm_path keeps
+# catching `rm -rf "/"`.
+_RM_FLAG_PREFIX = _CMDPOS + r'rm\s+(-[^\s]*\s+)*'
+
 HARDLINE_PATTERNS = [
-    # rm recursive targeting the root filesystem or protected roots
-    (r'\brm\s+(-[^\s]*\s+)*(/|/\*|/ \*)(\s|$)', "recursive delete of root filesystem"),
-    (r'\brm\s+(-[^\s]*\s+)*(/home|/home/\*|/root|/root/\*|/etc|/etc/\*|/usr|/usr/\*|/var|/var/\*|/bin|/bin/\*|/sbin|/sbin/\*|/boot|/boot/\*|/lib|/lib/\*)(\s|$)', "recursive delete of system directory"),
-    (r'\brm\s+(-[^\s]*\s+)*(~|\$HOME)(/?|/\*)?(\s|$)', "recursive delete of home directory"),
+    # rm recursive targeting the root filesystem or protected roots.
+    # `${HOME}` brace form and quoted paths (`rm -rf "/"`, `rm -rf "$HOME"`)
+    # are handled via _hardline_rm_path so the floor cannot be bypassed with
+    # the ordinary quoting/brace shell idioms.
+    (_RM_FLAG_PREFIX + _hardline_rm_path(r'/|/\*|/ \*'), "recursive delete of root filesystem"),
+    (_RM_FLAG_PREFIX + _hardline_rm_path(_HARDLINE_SYSTEM_DIRS), "recursive delete of system directory"),
+    (_RM_FLAG_PREFIX + _hardline_rm_path(r'(?:~|\$\{?HOME\}?)(?:/?|/\*)?'), "recursive delete of home directory"),
     # Filesystem format
     (r'\bmkfs(\.[a-z0-9]+)?\b', "format filesystem (mkfs)"),
     # Raw block device overwrites (dd + redirection)
