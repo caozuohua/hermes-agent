@@ -288,6 +288,126 @@ def _sanitize_subprocess_env(base_env: dict | None, extra_env: dict | None = Non
     return sanitized
 
 
+# Tier-1 secrets: stripped from EVERY spawned subprocess unconditionally —
+# even when the caller opts into credential inheritance for a model-driving
+# CLI (claude / codex / gemini).  These are not LLM provider credentials; no
+# legitimate child Hermes spawns needs them, and they are the highest-value
+# secrets to keep out of a compromised dependency's reach (gateway bot tokens,
+# GitHub auth, remote-compute tokens, dashboard session secret).  The set is a
+# narrow subset of _HERMES_PROVIDER_ENV_BLOCKLIST; provider keys are handled by
+# the conditional Tier-2 strip in hermes_subprocess_env().
+_ALWAYS_STRIP_KEYS: frozenset[str] = frozenset({
+    # GitHub auth
+    "GH_TOKEN",
+    "GITHUB_TOKEN",
+    "GITHUB_APP_ID",
+    "GITHUB_APP_PRIVATE_KEY_PATH",
+    "GITHUB_APP_INSTALLATION_ID",
+    # Gateway / messaging bot tokens and access control
+    "TELEGRAM_BOT_TOKEN",
+    "DISCORD_BOT_TOKEN",
+    "SLACK_BOT_TOKEN",
+    "SLACK_APP_TOKEN",
+    "SLACK_SIGNING_SECRET",
+    "GATEWAY_ALLOWED_USERS",
+    "GATEWAY_ALLOW_ALL_USERS",
+    # Gateway relay auth — the ID/secret/delivery-key triplet the gateway
+    # provisions and persists to the 0600 .env. Stripped unconditionally on
+    # EVERY spawn surface (terminal + model-driving CLIs) so it can't drift
+    # between paths: _SECRET / _DELIVERY_KEY are also matched by
+    # _is_hermes_internal_secret, but _ID has no secret suffix, so it must be
+    # enumerated here to stay stripped on the inherit_credentials=True path
+    # (codex / copilot), which skips the Tier-2 blocklist.
+    "GATEWAY_RELAY_ID",
+    "GATEWAY_RELAY_SECRET",
+    "GATEWAY_RELAY_DELIVERY_KEY",
+    "HASS_TOKEN",
+    "EMAIL_PASSWORD",
+    "HERMES_DASHBOARD_SESSION_TOKEN",
+    # Remote-compute / infrastructure secrets
+    "MODAL_TOKEN_ID",
+    "MODAL_TOKEN_SECRET",
+    "DAYTONA_API_KEY",
+})
+
+
+def hermes_subprocess_env(*, inherit_credentials: bool = False) -> dict[str, str]:
+    """Build a sanitized environment dict for a spawned subprocess.
+
+    Centralized helper for the **non-terminal** spawn surface (browser,
+    ACP/CLI executors, computer-use driver, dep-ensure, TUI Node host,
+    detached gateway).  Use this instead of copying ``os.environ`` directly
+    so strip-by-default is the uniform policy across every spawn site, with a
+    single source of truth (``_HERMES_PROVIDER_ENV_BLOCKLIST``).  The terminal
+    / execute_code path keeps using :func:`_sanitize_subprocess_env`, which is
+    skill-aware (``env_passthrough``); this helper is for spawns that have no
+    skill-passthrough concept.
+
+    Two-tier stripping:
+
+    * **Tier 1 (always):** ``_ALWAYS_STRIP_KEYS`` — gateway bot tokens, GitHub
+      auth, and remote-compute secrets are removed regardless of
+      ``inherit_credentials``.  No child Hermes spawns legitimately needs them.
+    * **Tier 2 (conditional):** the rest of ``_HERMES_PROVIDER_ENV_BLOCKLIST``
+      (LLM provider API keys, tool secrets) is removed unless the caller passes
+      ``inherit_credentials=True``.
+
+    Pass ``inherit_credentials=True`` **only** when the child legitimately
+    needs LLM provider credentials — a user-blessed ``claude`` / ``codex`` /
+    ``gemini`` CLI executor, or the TUI Node host that makes model calls.  The
+    flag is grep-able for audit: ``grep -rn 'inherit_credentials=True'`` lists
+    every spawn site that still receives provider credentials.
+
+    Callers that need a *specific* non-provider secret (e.g. the browser worker
+    needs ``BROWSERBASE_API_KEY`` / ``FIRECRAWL_API_KEY``) should call with
+    ``inherit_credentials=False`` and copy just those keys back from
+    ``os.environ`` into the returned dict.
+    """
+    env = os.environ.copy()
+
+    # Tier 1 — always strip.
+    for key in _ALWAYS_STRIP_KEYS:
+        env.pop(key, None)
+    # Internal routing hints and Hermes-internal dynamic secrets
+    # (``AUXILIARY_<TASK>_API_KEY`` / ``_BASE_URL`` side-LLM credentials,
+    # ``GATEWAY_RELAY_*`` relay-auth material) must never reach a child,
+    # regardless of ``inherit_credentials`` — a model-driving CLI has no
+    # legitimate use for them. See :func:`_is_hermes_internal_secret`.
+    for key in list(env):
+        if key.startswith(_HERMES_PROVIDER_ENV_FORCE_PREFIX):
+            env.pop(key, None)
+        elif _is_hermes_internal_secret(key):
+            env.pop(key, None)
+
+    if not inherit_credentials:
+        # Tier 2 — strip provider/tool credentials unless explicitly inherited.
+        for key in _HERMES_PROVIDER_ENV_BLOCKLIST:
+            env.pop(key, None)
+
+    # Windows UTF-8 safety for spawned processes (#31420).
+    env.setdefault("PYTHONUTF8", "1")
+
+    _inject_context_hermes_home(env)
+    from hermes_constants import apply_subprocess_home_env
+    apply_subprocess_home_env(env)
+
+    # Active-venv markers must not clobber another project's environment.
+    for _marker in _ACTIVE_VENV_MARKER_VARS:
+        env.pop(_marker, None)
+
+    # Cross-session leak guard, same as the terminal spawn paths: this helper
+    # copies os.environ, whose HERMES_SESSION_* mirror is a last-writer-wins
+    # global under a concurrent multi-session host. A caller that re-binds the
+    # session identity explicitly (slash_worker/ACP via --session-key argv) is
+    # unaffected — bound ContextVars win here — but a caller that spawns without
+    # re-binding (e.g. tui_gateway cli.exec) would otherwise inherit a FOREIGN
+    # session's identity. Strip _UNSET session vars when engaged so that can't
+    # happen; single uniform policy across every spawn surface.
+    _inject_session_context_env(env)
+
+    return env
+
+
 def _find_bash() -> str:
     """Find bash for command execution."""
     if not _IS_WINDOWS:
