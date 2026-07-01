@@ -61,9 +61,25 @@ def _is_hermes_provider_credential(name: str) -> bool:
     wrap third-party APIs still work.
     """
     try:
-        from tools.environments.local import _HERMES_PROVIDER_ENV_BLOCKLIST
-    except Exception:
-        return False
+        from tools.environments.local import (
+            _HERMES_PROVIDER_ENV_BLOCKLIST,
+            _is_hermes_internal_secret,
+        )
+    except Exception as e:
+        logger.warning(
+            "env passthrough: provider credential blocklist import failed; "
+            "failing closed and refusing passthrough registration for %r: %s",
+            name,
+            e,
+        )
+        return True
+    # Dynamically-generated Hermes-internal secrets (AUXILIARY_*_API_KEY /
+    # _BASE_URL side-LLM credentials, GATEWAY_RELAY_* relay-auth) are provider
+    # credentials the static blocklist can't enumerate — they're injected per
+    # task/relay at gateway startup. A skill must not be able to register them
+    # as passthrough and tunnel them into an execute_code / terminal child.
+    if _is_hermes_internal_secret(name):
+        return True
     return name in _HERMES_PROVIDER_ENV_BLOCKLIST
 
 
@@ -159,5 +175,4 @@ def get_all_passthrough() -> frozenset[str]:
 def clear_env_passthrough() -> None:
     """Reset the skill-scoped allowlist (e.g. on session reset)."""
     _get_allowed().clear()
-
 
