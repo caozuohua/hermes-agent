@@ -61,15 +61,19 @@ Notes:
 
 ## Batch 4 - Gateway And Subprocess Safety
 
-- [ ] `40dbfa0e` fix(gateway): revive gateway on /restart under Restart=on-failure units
-- [ ] `cc395e80` fix(gateway): close cross-session HERMES_SESSION_* leak into subprocess env
-- [ ] `daf4f1a7` fix(tools): close same session leak on hermes_subprocess_env spawn surface
-- [ ] `a658f3b2` fix(security): strip dynamic Hermes secrets from all subprocess spawn env
-- [ ] `1a0d7878` security(terminal): strip Vertex/GCP credential path envs from subprocess env
+- [x] `40dbfa0e` fix(gateway): revive gateway on /restart under Restart=on-failure units
+- [x] `cc395e80` fix(gateway): close cross-session HERMES_SESSION_* leak into subprocess env
+- [x] `daf4f1a7` fix(tools): close same session leak on hermes_subprocess_env spawn surface
+- [x] `a658f3b2` fix(security): strip dynamic Hermes secrets from all subprocess spawn env
+- [x] `1a0d7878` security(terminal): strip Vertex/GCP credential path envs from subprocess env
 
 Notes:
 - Lite is single-profile today, but subprocess env hygiene still matters on a
   VPS with terminal/code execution enabled.
+- Verified on 2026-07-02 with focused gateway shutdown/session inheritance,
+  local subprocess session leak, dynamic secret, env_passthrough,
+  hermes_subprocess_env, codex app-server spawn-env, Docker env, and
+  py_compile checks.
 - Keep Tirith-related changes out unless explicitly re-enabled.
 
 ## Not Planned For Lite
