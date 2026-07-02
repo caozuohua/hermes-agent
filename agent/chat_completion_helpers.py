@@ -1830,6 +1830,49 @@ def interruptible_streaming_api_call(agent, api_kwargs: dict, *, on_first_delta=
         request_client_holder["diag"] = _diag
         stream = request_client.chat.completions.create(**stream_kwargs)
 
+        # Some OpenAI-compatible adapters (for example copilot-acp, and the MoA
+        # openai-codex aggregator) accept stream=True but still return a
+        # completed response object rather than an iterator of chunks.  Treat
+        # that as "streaming unsupported" for the rest of this session instead
+        # of crashing on ``for chunk in stream`` with ``'types.SimpleNamespace'
+        # object is not iterable`` (#11732, #55933).
+        #
+        # Discriminate on the mere PRESENCE of a ``choices`` attribute, not on
+        # it being a non-empty list: an adapter may hand back a completed
+        # response whose ``choices`` is ``None`` or empty (an error /
+        # content-filter / terminal frame), and every such shape is still a
+        # whole response — not a token stream — that would crash iteration just
+        # the same.  A genuine provider stream (SDK ``Stream`` object,
+        # generator) exposes no ``choices`` attribute, so it is left untouched.
+        if hasattr(stream, "choices"):
+            logger.info(
+                "Streaming request returned a final response object instead of "
+                "an iterator; switching %s/%s to non-streaming for this session.",
+                agent.provider or "unknown",
+                agent.model or "unknown",
+            )
+            agent._disable_streaming = True
+            # An empty/None ``choices`` carries no message to surface; return the
+            # completed object as-is so the outer loop's normal invalid-response
+            # validation (conversation_loop.py) handles it via the retry path,
+            # never ``for chunk in stream``.
+            choices = stream.choices
+            first_choice = choices[0] if isinstance(choices, (list, tuple)) and choices else None
+            message = getattr(first_choice, "message", None)
+            if message is not None:
+                reasoning_text = (
+                    getattr(message, "reasoning_content", None)
+                    or getattr(message, "reasoning", None)
+                )
+                if isinstance(reasoning_text, str) and reasoning_text:
+                    _fire_first_delta()
+                    agent._fire_reasoning_delta(reasoning_text)
+                content = getattr(message, "content", None)
+                if isinstance(content, str) and content:
+                    _fire_first_delta()
+                    agent._fire_stream_delta(content)
+            return stream
+
         # Capture rate limit headers from the initial HTTP response.
         # The OpenAI SDK Stream object exposes the underlying httpx
         # response via .response before any chunks are consumed.
