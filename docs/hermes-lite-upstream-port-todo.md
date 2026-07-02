@@ -43,18 +43,21 @@ Notes:
 
 ## Batch 3 - Model Routing, Fallback, And Streaming
 
-- [ ] `88d1d620` fix(streaming): handle completed responses with empty/None choices
-- [ ] `a04b7024` fix(error-classifier): route 5xx context-overflow into compression
-- [ ] `c8376e0d` fix(auxiliary): stop SDK retries from multiplying compression stall
-- [ ] `88e6f9b9` fix(auxiliary): preserve max_tokens for NVIDIA NIM aux calls
-- [ ] `fae92064` fix(agent): throttle cross-turn fallback-switch replay storm
-- [ ] `36bfe3a4` fix(anthropic+feishu): model-gate max_tokens fallback; wire Feishu channel_prompt
+- [x] `88d1d620` fix(streaming): handle completed responses with empty/None choices
+- [x] `a04b7024` fix(error-classifier): route 5xx context-overflow into compression
+- [x] `c8376e0d` fix(auxiliary): stop SDK retries from multiplying compression stall
+- [x] `88e6f9b9` fix(auxiliary): preserve max_tokens for NVIDIA NIM aux calls
+- [x] `fae92064` fix(agent): throttle cross-turn fallback-switch replay storm
+- [x] `36bfe3a4` fix(anthropic+feishu): model-gate max_tokens fallback; wire Feishu channel_prompt
 
 Notes:
 - Prioritize OpenAI-compatible/newAPI/NIM behavior over desktop or OAuth-only
   provider changes.
-- Feishu channel prompt support is useful only if the Lite Feishu adapter still
-  has the same construction sites.
+- Verified on 2026-07-02 with focused streaming, error-classifier,
+  auxiliary-client, fallback-cooldown, Feishu channel-prompt tests, plus
+  `python -m py_compile agent\chat_completion_helpers.py
+  agent\error_classifier.py agent\auxiliary_client.py
+  plugins\platforms\feishu\adapter.py`.
 
 ## Batch 4 - Gateway And Subprocess Safety
 

@@ -68,9 +68,10 @@ class TestExhaustionArmsCooldown:
             # Chain now exhausted; a non-rate-limit failure must arm cooldown.
             assert agent._try_activate_fallback() is False
         cooldown = getattr(agent, "_rate_limited_until", 0)
+        after = time.monotonic()
         assert cooldown > before
         # Cooldown is the short exhaustion window, not the 60s rate-limit one.
-        assert cooldown <= before + _FALLBACK_EXHAUSTED_COOLDOWN_S + 1.0
+        assert cooldown <= after + _FALLBACK_EXHAUSTED_COOLDOWN_S + 0.25
 
     def test_no_chain_does_not_arm_cooldown(self):
         """An empty chain (no fallback configured) must not arm a cooldown —
