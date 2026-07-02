@@ -24,16 +24,22 @@ Notes:
 
 ## Batch 2 - State DB And Durable Transcript
 
-- [ ] `f049227f` fix(state): order conversation replay by id, not timestamp
-- [ ] `0695a6bc` fix(state): periodically merge FTS5 segments to curb write-lock contention
-- [ ] `e4c6d1b2` fix(agent): persist messages by intrinsic marker to stop id() reuse data loss
-- [ ] `59e7e9d0` fix(agent): persist recovered final responses
-- [ ] `053424c4` fix(agent): preserve final_response on failure returns
+- [x] `f049227f` fix(state): order conversation replay by id, not timestamp
+- [x] `0695a6bc` fix(state): periodically merge FTS5 segments to curb write-lock contention
+- [x] `e4c6d1b2` fix(agent): persist messages by intrinsic marker to stop id() reuse data loss
+- [x] `59e7e9d0` fix(agent): persist recovered final responses
+- [x] `053424c4` fix(agent): preserve final_response on failure returns
 
 Notes:
 - These map directly to long-lived VPS stability and trace quality.
-- Verify with `tests/test_hermes_state.py` and focused `run_agent` persistence
-  tests.
+- Verified on 2026-07-02 with `python -m pytest
+  tests\test_hermes_state.py tests\run_agent\test_identity_flush.py
+  tests\agent\test_turn_finalizer_final_response_persistence.py
+  tests\run_agent\test_run_agent.py -q -k "final_response or RetryExhaustion
+  or invalid_response or identity_flush or conversation_replay or optimize_fts
+  or SessionLifecycle or SessionTitleLineage"` and `python -m py_compile
+  hermes_state.py run_agent.py agent\turn_finalizer.py
+  agent\conversation_loop.py`.
 
 ## Batch 3 - Model Routing, Fallback, And Streaming
 
