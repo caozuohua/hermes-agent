@@ -63,6 +63,32 @@ def lite_config(monkeypatch):
             "default": "MiniMax-M3",
             "provider": "custom",
             "base_url": "https://api.tokenrouter.com/v1",
+            "aliases": {
+                "m3": "custom/MiniMax-M3",
+                "fast": "newapi-local/mistralai/mistral-small-4-119b-2603",
+                "safe": "newapi-local/mistralai/mistral-large-3-675b-instruct-2512",
+            },
+        },
+        "providers": {
+            "custom": {
+                "model": "MiniMax-M3",
+                "models": {"MiniMax-M3": {"context_length": 65536}},
+            },
+            "newapi-local": {
+                "model": "mistralai/mistral-small-4-119b-2603",
+                "models": {
+                    "mistralai/mistral-small-4-119b-2603": {
+                        "context_length": 131072,
+                    },
+                    "mistralai/mistral-large-3-675b-instruct-2512": {
+                        "context_length": 131072,
+                    },
+                },
+            },
+        },
+        "fallback_model": {
+            "provider": "newapi-local",
+            "model": "mistralai/mistral-large-3-675b-instruct-2512",
         },
         "agent": {
             "disabled_toolsets": ["browser", "image_gen", "tts", "computer_use"]
@@ -92,8 +118,13 @@ async def test_lite_model_without_args_reports_current_model_only(lite_config):
     assert "MiniMax-M3" in result
     assert "custom" in result
     assert "--provider" not in result
-    assert "Available" not in result
-    assert len(result) < 700
+    assert "Available models:" in result
+    assert "/model m3" in result
+    assert "/model fast" in result
+    assert "/model safe" in result
+    assert "current" in result
+    assert "fallback" in result
+    assert len(result) < 1800
 
 
 @pytest.mark.asyncio

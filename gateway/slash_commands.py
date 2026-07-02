@@ -80,6 +80,98 @@ class GatewaySlashCommandsMixin:
         return lines
 
     @staticmethod
+    def _lite_model_alias_lines(cfg: dict[str, Any]) -> list[str]:
+        """Render configured Lite model aliases without probing provider APIs."""
+        model_cfg = cfg.get("model", {}) if isinstance(cfg.get("model"), dict) else {}
+        default_provider = str(model_cfg.get("provider") or "").strip()
+        current_model = str(model_cfg.get("default") or model_cfg.get("model") or "").strip()
+        current_target = (
+            f"{default_provider}/{current_model}"
+            if default_provider and current_model
+            else current_model
+        )
+
+        fallback_targets: set[str] = set()
+        fallback_cfg = cfg.get("fallback_model")
+        fallback_entries = fallback_cfg if isinstance(fallback_cfg, list) else [fallback_cfg]
+        for entry in fallback_entries:
+            if not isinstance(entry, dict):
+                continue
+            provider = str(entry.get("provider") or "").strip()
+            model = str(entry.get("model") or "").strip()
+            if provider and model:
+                fallback_targets.add(f"{provider}/{model}")
+
+        aliases_cfg = model_cfg.get("aliases") if isinstance(model_cfg, dict) else {}
+        aliases_by_target: dict[str, list[str]] = {}
+        if isinstance(aliases_cfg, dict):
+            for alias, target in aliases_cfg.items():
+                alias_s = str(alias).strip()
+                target_s = str(target).strip()
+                if not alias_s or not target_s:
+                    continue
+                aliases_by_target.setdefault(target_s, []).append(alias_s)
+
+        targets: set[str] = set(aliases_by_target)
+        providers_cfg = cfg.get("providers")
+        if isinstance(providers_cfg, dict):
+            for provider, provider_cfg in providers_cfg.items():
+                if not isinstance(provider_cfg, dict):
+                    continue
+                models = provider_cfg.get("models")
+                if isinstance(models, dict):
+                    for model in models:
+                        model_s = str(model).strip()
+                        if model_s:
+                            targets.add(f"{provider}/{model_s}")
+                configured_model = str(provider_cfg.get("model") or "").strip()
+                if configured_model:
+                    targets.add(f"{provider}/{configured_model}")
+        if current_target:
+            targets.add(current_target)
+        targets.update(fallback_targets)
+
+        if not targets:
+            return []
+
+        def _split_target(target: str) -> tuple[str, str]:
+            if "/" in target:
+                provider, model = target.split("/", 1)
+                return provider, model
+            return default_provider or "model", target
+
+        def _sort_key(target: str) -> tuple[int, str]:
+            if target == current_target:
+                rank = 0
+            elif target in fallback_targets:
+                rank = 1
+            elif target in aliases_by_target:
+                rank = 2
+            else:
+                rank = 3
+            provider, model = _split_target(target)
+            return rank, provider.lower(), model.lower()
+
+        lines = ["Available models:"]
+        for target in sorted(targets, key=_sort_key):
+            provider, model = _split_target(target)
+            aliases = sorted(set(aliases_by_target.get(target, [])), key=lambda a: (len(a), a))
+            command = aliases[0] if aliases else model
+            tags = []
+            if target == current_target:
+                tags.append("current")
+            if target in fallback_targets:
+                tags.append("fallback")
+            tag_text = f" ({', '.join(tags)})" if tags else ""
+            line = f"- `/model {command}` -> `{model}` [{provider}]{tag_text}"
+            if len(aliases) > 1:
+                line += f" | aliases: {', '.join(f'`{a}`' for a in aliases[1:4])}"
+                if len(aliases) > 4:
+                    line += f", +{len(aliases) - 4}"
+            lines.append(line)
+        return lines
+
+    @staticmethod
     def _lite_disabled_toolsets(cfg: dict[str, Any]) -> str:
         agent_cfg = cfg.get("agent", {}) if isinstance(cfg.get("agent"), dict) else {}
         disabled = agent_cfg.get("disabled_toolsets") or []
@@ -1259,6 +1351,8 @@ class GatewaySlashCommandsMixin:
             lines = [
                 "HermesLite model",
                 *self._lite_model_config_lines(lite_cfg),
+                "",
+                *self._lite_model_alias_lines(lite_cfg),
                 "",
                 "Use `/model <model-name>` only when you intentionally want a session-level switch.",
                 "Use `/model <model-name> --global` only after validating it on this VPS.",
