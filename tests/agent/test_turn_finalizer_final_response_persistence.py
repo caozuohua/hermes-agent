@@ -110,3 +110,75 @@ def test_final_response_closes_tool_tail_before_persistence(monkeypatch):
     assert result["messages"][-1] == {"role": "assistant", "content": "Done."}
     assert agent.persisted_messages is not None
     assert agent.persisted_messages[-1] == {"role": "assistant", "content": "Done."}
+
+
+def test_interrupted_tool_tail_uses_shared_closer_before_persistence(monkeypatch):
+    """Interrupted turns must not persist a transcript ending at a tool result."""
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = FakeAgent()
+    messages = [
+        {"role": "user", "content": "stop after tool"},
+        {
+            "role": "assistant",
+            "content": "",
+            "tool_calls": [
+                {"id": "call-1", "function": {"name": "terminal", "arguments": "{}"}}
+            ],
+        },
+        {"role": "tool", "tool_call_id": "call-1", "name": "terminal", "content": "ok"},
+    ]
+
+    result = finalize_turn(
+        agent,
+        final_response="",
+        api_call_count=1,
+        interrupted=True,
+        failed=False,
+        messages=messages,
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="stop after tool",
+        original_user_message="stop after tool",
+        _should_review_memory=False,
+        _turn_exit_reason="interrupted",
+    )
+
+    assert result["messages"][-1] == {
+        "role": "assistant",
+        "content": "Operation interrupted.",
+    }
+    assert agent.persisted_messages[-1] == {
+        "role": "assistant",
+        "content": "Operation interrupted.",
+    }
+
+
+def test_cleanup_failure_is_reported_without_losing_response(monkeypatch):
+    """Persistence cleanup errors should be surfaced, not raised from finalizer."""
+    monkeypatch.setattr("hermes_cli.plugins.invoke_hook", lambda *_a, **_kw: [])
+    agent = FakeAgent()
+
+    def fail_persist(_messages, _conversation_history):
+        raise RuntimeError("db unavailable")
+
+    agent._persist_session = fail_persist
+
+    result = finalize_turn(
+        agent,
+        final_response="Done.",
+        api_call_count=1,
+        interrupted=False,
+        failed=False,
+        messages=[{"role": "user", "content": "hi"}, {"role": "assistant", "content": "Done."}],
+        conversation_history=[],
+        effective_task_id="task",
+        turn_id="turn",
+        user_message="hi",
+        original_user_message="hi",
+        _should_review_memory=False,
+        _turn_exit_reason="text_response",
+    )
+
+    assert result["final_response"] == "Done."
+    assert result["cleanup_errors"] == ["persist_session: db unavailable"]
