@@ -21,9 +21,13 @@ class _SessionStore:
         )
         self._entries = {SESSION_KEY: self.entry}
         self.save_calls = 0
+        self.peer_records = []
 
     def _save(self):
         self.save_calls += 1
+
+    def _record_gateway_session_peer(self, session_id, session_key, source):
+        self.peer_records.append((session_id, session_key, source))
 
 
 class _CompressionThenFailureAgent:

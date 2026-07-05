@@ -76,6 +76,70 @@ Notes:
   py_compile checks.
 - Keep Tirith-related changes out unless explicitly re-enabled.
 
+## Review Checkpoint - 2026-07-05
+
+Last reviewed upstream main: `605727e3b` (2026-07-05).
+
+Next review should scan only `605727e3b..origin/main`, plus the deferred
+watchlist below. Do not re-triage the full fork gap unless the base branch is
+rebuilt.
+
+### Batch 5 - Feishu Gateway Stability And Security
+
+- [x] `674e16e7c` fix(redact): stop DB-connstr redaction from corrupting code output
+- [x] `c1c179a23` fix(security): redact secrets in background process + foreground env-dump output
+- [x] `86e64900b` fix(gateway): preserve sessions across restarts
+- [x] `3a83b6bc5` fix(gateway): self-heal stale sessions.json routing at message time
+- [x] `d6c53dcdc` fix(gateway): stop per-turn agent-cache eviction from model + message_id signature churn
+- [x] `17f07aebd` fix(security): close shell line-continuation bypass in command detection
+- [x] `7534b5be2` fix(security): anchor rm hardline rules to command position
+- [x] `e7562c394` fix(gateway): skip cross-process guard on session_id switch under same session_key
+- [x] `0c0b4b698` fix(security): collapse `$IFS` whitespace obfuscation before approval checks
+- [x] `51feecc2b` fix(security): block shell-collapse `rm -rf /` spellings at the hardline floor
+- [x] `6a6fd4211` fix(security): block subshell/brace-group wrappers at the hardline floor
+- [x] `a1f62f477` fix(gateway): freshness-gate resume_pending against per-message zombies
+- [x] `74e59b8b6` fix(security): close abbreviated-flag bypasses in git/sudo approval patterns
+- [x] `d5b4879d4` fix(gateway): preserve peer routing across compression recovery
+- [x] `00ec3b188` fix(gateway): ignore stale compression session splits
+- [x] `201b646d6` fix(gateway): complete on_session_end coverage across all eviction paths
+- [x] `485ae54c9` fix(gateway): pass full transcript to compressor instead of filtered messages
+- [x] `ebfc49c4d` fix(approval): require exact `./..` segments in the root-collapse hardline token
+
+Notes:
+- `c1c179a23` was ported without `infographic/redact-terminal-43025/infographic.png`.
+- Already covered before this batch: `36bfe3a44` Feishu channel_prompt and
+  `cc395e805` HERMES_SESSION_* subprocess leak.
+- Local verification on 2026-07-05:
+  - `.venv\Scripts\python.exe -m py_compile gateway/run.py gateway/session.py
+    gateway/session_context.py hermes_state.py agent/redact.py
+    agent/chat_completion_helpers.py tools/approval.py tools/terminal_tool.py
+    tools/process_registry.py tools/environments/local.py
+    plugins/platforms/feishu/adapter.py`
+  - `python -m pytest tests/agent/test_redact.py tests/tools/test_approval.py
+    tests/tools/test_hardline_blocklist.py tests/gateway/test_session.py
+    tests/gateway/test_clean_shutdown_marker.py
+    tests/gateway/test_session_store_runtime_stale_guard.py
+    tests/gateway/test_session_id_cache_coherence.py
+    tests/gateway/test_compression_failure_session_sync.py
+    tests/gateway/test_session_store_stale_prune.py
+    tests/gateway/test_compress_command.py -q` -> 656 passed.
+  - `python -m pytest tests/tools/test_process_registry.py::TestHandleProcessRedaction -q` -> 3 passed.
+  - `python -m pytest` for the six new fake-runner agent-cache regression
+    tests -> 6 passed.
+  - Full local Windows pytest was not used as a release gate because
+    process/PTTY and AIAgent cache tests depend on Linux-only `os.getpgid` /
+    PTY behavior and a single Python environment with both pytest and compiled
+    OpenAI/Pydantic wheels.
+- VPS deployment verification will be appended after sync/restart.
+
+Deferred:
+- `origin/fix/feishu-ws-close-frame` (`1a296b96d`, `91e080583`) - wait until
+  it reaches upstream main or Feishu disconnects reproduce on Lite.
+
+Skipped for Lite:
+- Desktop, TUI, MCP, Computer Use, STT/TTS, image/vision, WhatsApp, Discord,
+  Telegram, Windows-only, broad provider/platform/product-surface work.
+
 ## Not Planned For Lite
 
 - MoA full product surface, `/learn`, `/journey`, Memory Graph, scale-to-zero,
