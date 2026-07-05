@@ -48,6 +48,17 @@ logger = logging.getLogger(__name__)
 # billing reasons keep their own 60s cooldown (set above); this is the
 # narrower non-rate-limit case.  See issue #24996.
 _FALLBACK_EXHAUSTED_COOLDOWN_S = 5.0
+_PROVIDER_RATE_LIMIT_COOLDOWN_S = 60.0
+_PROVIDER_OVERLOAD_COOLDOWN_S = 120.0
+_PROVIDER_TRANSIENT_COOLDOWN_S = 30.0
+
+_PROVIDER_COOLDOWN_REASONS = {
+    FailoverReason.rate_limit,
+    FailoverReason.billing,
+    FailoverReason.overloaded,
+    FailoverReason.server_error,
+    FailoverReason.timeout,
+}
 
 
 def _ra():
@@ -59,6 +70,75 @@ def _ra():
     """
     import run_agent
     return run_agent
+
+
+def _provider_cooldown_key(provider: str, base_url: str = "") -> str:
+    provider_norm = (provider or "").strip().lower()
+    base_norm = str(base_url or "").strip().rstrip("/").lower()
+    return f"{provider_norm}|{base_norm}" if base_norm else provider_norm
+
+
+def _provider_cooldown_duration(reason: "FailoverReason | None") -> float:
+    if reason in {FailoverReason.rate_limit, FailoverReason.billing}:
+        return _PROVIDER_RATE_LIMIT_COOLDOWN_S
+    if reason == FailoverReason.overloaded:
+        return _PROVIDER_OVERLOAD_COOLDOWN_S
+    if reason in {FailoverReason.server_error, FailoverReason.timeout}:
+        return _PROVIDER_TRANSIENT_COOLDOWN_S
+    return 0.0
+
+
+def record_provider_failure(
+    agent,
+    *,
+    reason: "FailoverReason | None",
+    status_code: Optional[int] = None,
+    summary: str = "",
+) -> None:
+    """Remember transient provider failures for routing and next-turn hints."""
+    if reason not in _PROVIDER_COOLDOWN_REASONS:
+        return
+    duration = _provider_cooldown_duration(reason)
+    if duration <= 0:
+        return
+    now = time.monotonic()
+    until = now + duration
+    provider = getattr(agent, "provider", "") or ""
+    base_url = getattr(agent, "base_url", "") or ""
+    key = _provider_cooldown_key(provider, base_url)
+    cooldowns = getattr(agent, "_provider_failure_cooldowns", None)
+    if cooldowns is None:
+        cooldowns = {}
+        agent._provider_failure_cooldowns = cooldowns
+    cooldowns[key] = max(float(cooldowns.get(key, 0) or 0), until)
+    # Also store provider-only so fallback entries without explicit base_url
+    # can be skipped before client resolution.
+    provider_key = _provider_cooldown_key(provider)
+    cooldowns[provider_key] = max(float(cooldowns.get(provider_key, 0) or 0), until)
+
+    agent._last_provider_failure = {
+        "provider": provider,
+        "model": getattr(agent, "model", "") or "",
+        "base_url": base_url,
+        "reason": reason.value if hasattr(reason, "value") else str(reason or ""),
+        "status_code": status_code,
+        "summary": str(summary or "")[:500],
+        "recorded_at": time.time(),
+        "cooldown_seconds": duration,
+        "cooldown_until_monotonic": until,
+    }
+
+
+def provider_cooldown_remaining(agent, provider: str, base_url: str = "") -> float:
+    cooldowns = getattr(agent, "_provider_failure_cooldowns", None) or {}
+    now = time.monotonic()
+    keys = [_provider_cooldown_key(provider, base_url), _provider_cooldown_key(provider)]
+    remaining = 0.0
+    for key in keys:
+        until = float(cooldowns.get(key, 0) or 0)
+        if until > now:
+            remaining = max(remaining, until - now)
+    return remaining
 
 
 def estimate_request_context_tokens(api_payload: Any) -> int:
@@ -1108,7 +1188,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     fb_provider = (fb.get("provider") or "").strip().lower()
     fb_model = (fb.get("model") or "").strip()
     if not fb_provider or not fb_model:
-        return agent._try_activate_fallback()  # skip invalid, try next
+        return agent._try_activate_fallback(reason=reason)  # skip invalid, try next
 
     # Skip entries that resolve to the current (provider, model) — falling
     # back to the same backend that just failed loops the failure. Compare
@@ -1118,12 +1198,24 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
     current_model = (getattr(agent, "model", "") or "").strip()
     current_base_url = str(getattr(agent, "base_url", "") or "").rstrip("/").lower()
     fb_base_url_for_dedup = (fb.get("base_url") or "").strip().rstrip("/").lower()
+    _cooldown_remaining = provider_cooldown_remaining(
+        agent,
+        fb_provider,
+        fb_base_url_for_dedup,
+    )
+    if _cooldown_remaining > 0:
+        logger.warning(
+            "Fallback skip: %s is cooling down for %.0fs after recent provider failure",
+            fb_provider,
+            _cooldown_remaining,
+        )
+        return agent._try_activate_fallback(reason=reason)
     if fb_provider == current_provider and fb_model == current_model:
         logger.warning(
             "Fallback skip: chain entry %s/%s matches current provider/model",
             fb_provider, fb_model,
         )
-        return agent._try_activate_fallback()
+        return agent._try_activate_fallback(reason=reason)
     if (
         fb_base_url_for_dedup
         and current_base_url
@@ -1134,7 +1226,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             "Fallback skip: chain entry base_url %s matches current backend",
             fb_base_url_for_dedup,
         )
-        return agent._try_activate_fallback()
+        return agent._try_activate_fallback(reason=reason)
 
     # Use centralized router for client construction.
     # raw_codex=True because the main agent needs direct responses.stream()
@@ -1165,7 +1257,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
             logger.warning(
                 "Fallback to %s failed: provider not configured",
                 fb_provider)
-            return agent._try_activate_fallback()  # try next in chain
+            return agent._try_activate_fallback(reason=reason)  # try next in chain
         try:
             from hermes_cli.model_normalize import normalize_model_for_provider
 
@@ -1335,7 +1427,7 @@ def try_activate_fallback(agent, reason: "FailoverReason | None" = None) -> bool
         return True
     except Exception as e:
         logger.error("Failed to activate fallback %s: %s", fb_model, e)
-        return agent._try_activate_fallback()  # try next in chain
+        return agent._try_activate_fallback(reason=reason)  # try next in chain
 
 
 

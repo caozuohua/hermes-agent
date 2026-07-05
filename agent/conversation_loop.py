@@ -2596,6 +2596,17 @@ def run_conversation(
                 _base = getattr(agent, "base_url", "unknown")
                 _model = getattr(agent, "model", "unknown")
                 _status_code_str = f" [HTTP {status_code}]" if status_code else ""
+                try:
+                    from agent.chat_completion_helpers import record_provider_failure
+
+                    record_provider_failure(
+                        agent,
+                        reason=classified.reason,
+                        status_code=status_code,
+                        summary=_error_summary,
+                    )
+                except Exception:
+                    logger.debug("provider failure state update failed", exc_info=True)
                 agent._buffer_vprint(f"⚠️  API call failed (attempt {retry_count}/{max_retries}): {error_type}{_status_code_str}")
                 agent._buffer_vprint(f"   🔌 Provider: {_provider}  Model: {_model}")
                 agent._buffer_vprint(f"   🌐 Endpoint: {_base}")

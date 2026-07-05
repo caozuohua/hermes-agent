@@ -535,6 +535,11 @@ def init_agent(
     # Rate limit tracking — updated from x-ratelimit-* response headers
     # after each API call.  Accessed by /usage slash command.
     agent._rate_limit_state: Optional["RateLimitState"] = None
+    # Provider-failure routing state.  A cached gateway agent can span many
+    # turns; keep recent 429/5xx/timeout failures here so fallback selection
+    # and the next turn can avoid immediately retrying a cooling-down backend.
+    agent._provider_failure_cooldowns = {}
+    agent._last_provider_failure = None
 
     # Credits tracking (dev-only, L0 usage-aware-credits) — updated from
     # x-nous-credits-* response headers after each API call.  Session-start

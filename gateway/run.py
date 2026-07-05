@@ -2339,6 +2339,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         # silent until the user manually re-sends. See #35314. ``"*"`` holds a
         # process-wide last-known-good for sessions seen for the first time.
         self._last_resolved_model: Dict[str, str] = {}
+        # One-shot per-session provider failure hints.  When a turn ends on
+        # 429/503/timeout, the next user turn gets a short system note so the
+        # model can adjust instead of blindly repeating the same route.
+        self._session_provider_failures: Dict[str, Dict[str, Any]] = {}
         # Overflow buffer for explicit /queue commands.  The adapter-level
         # _pending_messages dict is a single slot per session (designed for
         # "next-turn" follow-ups where repeated sends collapse into one
@@ -8440,6 +8444,44 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 pass
         return source
 
+    def _record_session_provider_failure(self, session_key: str, failure: Any) -> None:
+        if not session_key or not isinstance(failure, dict):
+            return
+        reason = str(failure.get("reason") or "").strip()
+        if reason not in {"rate_limit", "billing", "overloaded", "server_error", "timeout"}:
+            return
+        data = dict(failure)
+        data["seen_by_model"] = False
+        data["recorded_at"] = float(data.get("recorded_at") or time.time())
+        self._session_provider_failures[session_key] = data
+
+    def _consume_session_provider_failure_note(self, session_key: str) -> str:
+        if not session_key:
+            return ""
+        state = self._session_provider_failures.get(session_key)
+        if not isinstance(state, dict) or state.get("seen_by_model"):
+            return ""
+        age = time.time() - float(state.get("recorded_at") or 0)
+        if age > 900:
+            self._session_provider_failures.pop(session_key, None)
+            return ""
+        state["seen_by_model"] = True
+        provider = str(state.get("provider") or "unknown").strip()
+        model = str(state.get("model") or "unknown").strip()
+        reason = str(state.get("reason") or "provider_failure").strip()
+        status = state.get("status_code")
+        summary = str(state.get("summary") or "").strip()
+        status_part = f" HTTP {status}" if status else ""
+        summary_part = f" Provider summary: {summary[:240]}" if summary else ""
+        return (
+            "[System note: The previous LLM turn hit a provider failure "
+            f"({reason}{status_part}) on {provider}/{model}. "
+            "Do not assume the prior task was completed. Prefer shorter, "
+            "resumable steps and avoid immediately retrying the same provider "
+            "if an alternative route is available."
+            f"{summary_part}]"
+        )
+
     async def _handle_message_with_agent(self, event, source, _quick_key: str, run_generation: int):
         """Inner handler that runs under the _running_agents sentinel guard."""
         _msg_start_time = time.time()
@@ -9141,6 +9183,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
         except Exception as _ts_err:
             logger.debug("Message timestamp injection failed (non-fatal): %s", _ts_err)
 
+        _provider_failure_note = self._consume_session_provider_failure_note(session_key)
+        if _provider_failure_note:
+            message_text = f"{_provider_failure_note}\n\n{message_text}"
+
         # Bind this gateway run generation to the adapter's active-session
         # event so deferred post-delivery callbacks can be released by the
         # same run that registered them.
@@ -9176,6 +9222,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 channel_prompt=event.channel_prompt,
                 persist_user_message=persist_user_message,
                 persist_user_timestamp=persist_user_timestamp,
+            )
+            self._record_session_provider_failure(
+                session_key,
+                agent_result.get("last_provider_failure") if isinstance(agent_result, dict) else None,
             )
 
             # Stop persistent typing indicator now that the agent is done
@@ -15665,6 +15715,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
 
             if not final_response:
                 error_msg = f"⚠️ {result['error']}" if result.get("error") else ""
+                _last_provider_failure = (
+                    getattr(agent, "_last_provider_failure", None)
+                    if agent is not None else None
+                )
                 return {
                     "final_response": error_msg,
                     "messages": result.get("messages", []),
@@ -15684,6 +15738,7 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                     "output_tokens": _output_toks,
                     "model": _resolved_model,
                     "context_length": _context_length,
+                    "last_provider_failure": _last_provider_failure,
                 }
             
             # Scan tool results for MEDIA:<path> tags that need to be delivered
@@ -15784,6 +15839,10 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 "model": _resolved_model,
                 "context_length": _context_length,
                 "session_id": effective_session_id,
+                "last_provider_failure": (
+                    getattr(agent, "_last_provider_failure", None)
+                    if agent is not None else None
+                ),
                 "response_previewed": result.get("response_previewed", False),
                 "response_transformed": result.get("response_transformed", False),
             }

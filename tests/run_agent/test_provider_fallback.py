@@ -8,6 +8,7 @@ advancement through multiple providers.
 from unittest.mock import MagicMock, patch
 
 from run_agent import AIAgent, _pool_may_recover_from_rate_limit
+from agent.error_classifier import FailoverReason
 
 
 def _make_agent(fallback_model=None):
@@ -305,3 +306,26 @@ class TestFallbackChainDedup:
 
         assert ok is False
         mock_resolve.assert_not_called()
+
+    def test_skips_provider_in_failure_cooldown(self):
+        """A recently failed provider should be skipped in the fallback chain."""
+        fbs = [
+            {"provider": "openai", "model": "gpt-4o"},
+            {"provider": "zai", "model": "glm-4.7"},
+        ]
+        agent = _make_agent(fallback_model=fbs)
+        agent._provider_failure_cooldowns = {"openai": 999999999.0}
+
+        called = []
+
+        def _resolve(provider, model=None, raw_codex=False, **kwargs):
+            called.append((provider, model))
+            return _mock_client(), model
+
+        with patch("agent.auxiliary_client.resolve_provider_client", side_effect=_resolve):
+            with patch("hermes_cli.model_normalize.normalize_model_for_provider", side_effect=lambda m, p: m):
+                ok = agent._try_activate_fallback(reason=FailoverReason.overloaded)
+
+        assert ok is True
+        assert called == [("zai", "glm-4.7")]
+        assert agent.model == "glm-4.7"
