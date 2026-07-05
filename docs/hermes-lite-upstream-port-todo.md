@@ -130,7 +130,17 @@ Notes:
     process/PTTY and AIAgent cache tests depend on Linux-only `os.getpgid` /
     PTY behavior and a single Python environment with both pytest and compiled
     OpenAI/Pydantic wheels.
-- VPS deployment verification will be appended after sync/restart.
+- VPS deployment verification on `instance-20260413-080555`:
+  - `HERMES_HOME=/home/caozuohua99/.hermes-lite
+    /home/caozuohua99/.hermes-lite/venv/bin/python -m py_compile ...` passed
+    for the runtime files listed above.
+  - `tools budget-check --platform feishu --max-tools 999 --json` passed:
+    17 tools, within budget.
+  - `systemctl restart hermes-lite.service` completed; service status:
+    `ActiveState=active`, `SubState=running`, `MainPID=12807`.
+  - `gateway.log` confirmed: `[Feishu] Connected in websocket mode (lark)`,
+    `✓ feishu connected`, and `Gateway running with 1 platform(s)` at
+    2026-07-05 16:37:59 UTC.
 
 Deferred:
 - `origin/fix/feishu-ws-close-frame` (`1a296b96d`, `91e080583`) - wait until
