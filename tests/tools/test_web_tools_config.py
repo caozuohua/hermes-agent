@@ -842,6 +842,32 @@ class TestCheckWebApiKey:
                     from tools.web_tools import check_web_api_key
                     assert check_web_api_key() is True
 
+    def test_search_available_when_configured_backend_falls_back_to_ddgs(self):
+        cfg = {
+            "backend": "tavily",
+            "search_backend": "tavily",
+            "search_fallback_backends": ["ddgs"],
+            "extract_backend": "tavily",
+        }
+        with patch("tools.web_tools._load_web_config", return_value=cfg):
+            with patch("tools.web_tools._is_backend_available", side_effect=lambda backend: backend == "ddgs"):
+                from tools.web_tools import check_web_search_available
+
+                assert check_web_search_available() is True
+
+    def test_extract_unavailable_when_only_search_fallback_is_available(self):
+        cfg = {
+            "backend": "tavily",
+            "search_backend": "tavily",
+            "search_fallback_backends": ["ddgs"],
+            "extract_backend": "tavily",
+        }
+        with patch("tools.web_tools._load_web_config", return_value=cfg):
+            with patch("tools.web_tools._is_backend_available", side_effect=lambda backend: backend == "ddgs"):
+                from tools.web_tools import check_web_extract_available
+
+                assert check_web_extract_available() is False
+
 
 def test_web_requires_env_includes_exa_key():
     from tools.web_tools import _web_requires_env

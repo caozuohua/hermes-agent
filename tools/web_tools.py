@@ -133,6 +133,24 @@ def _env_value(name: str) -> str:
 def _has_env(name: str) -> bool:
     return bool(_env_value(name))
 
+_WEB_SEARCH_BACKENDS = frozenset({
+    "exa",
+    "parallel",
+    "firecrawl",
+    "tavily",
+    "searxng",
+    "brave-free",
+    "ddgs",
+    "xai",
+})
+
+_WEB_EXTRACT_BACKENDS = frozenset({
+    "exa",
+    "parallel",
+    "firecrawl",
+    "tavily",
+})
+
 def _load_web_config() -> dict:
     """Load the ``web:`` section from ~/.hermes/config.yaml."""
     try:
@@ -149,7 +167,7 @@ def _get_backend() -> str:
     keys manually without running setup.
     """
     configured = (_load_web_config().get("backend") or "").lower().strip()
-    if configured in {"parallel", "firecrawl", "tavily", "exa", "searxng", "brave-free", "ddgs", "xai"}:
+    if configured in _WEB_SEARCH_BACKENDS:
         return configured
 
     # Fallback for manual / legacy config — pick the highest-priority
@@ -1275,16 +1293,62 @@ async def web_extract_tool(
         return tool_error(error_msg)
 
 
-# Convenience function to check Firecrawl credentials
-def check_web_api_key() -> bool:
-    """Check whether the configured web backend is available."""
-    configured = _load_web_config().get("backend", "").lower().strip()
-    if configured in {"exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai"}:
-        return _is_backend_available(configured)
+# Convenience functions to check web backend credentials
+def check_web_search_available() -> bool:
+    """Check whether ``web_search`` can run with the current configuration."""
+    cfg = _load_web_config()
+    primary = _get_search_backend()
+    if primary in _WEB_SEARCH_BACKENDS and _is_backend_available(primary):
+        return True
+
+    fallback_configured = (
+        "search_fallback_backends" in cfg
+        or "search_fallback_backend" in cfg
+    )
+    if fallback_configured:
+        return any(
+            backend in _WEB_SEARCH_BACKENDS
+            for backend in _get_search_fallback_backends(primary)
+        )
+
+    configured = (
+        cfg.get("search_backend")
+        or cfg.get("backend")
+        or ""
+    )
+    if str(configured).strip():
+        return False
+
     return any(
         _is_backend_available(backend)
-        for backend in ("exa", "parallel", "firecrawl", "tavily", "searxng", "brave-free", "ddgs", "xai")
+        for backend in _WEB_SEARCH_BACKENDS
     )
+
+
+def check_web_extract_available() -> bool:
+    """Check whether ``web_extract`` can run with the current configuration."""
+    cfg = _load_web_config()
+    backend = _get_extract_backend()
+    if backend in _WEB_EXTRACT_BACKENDS:
+        return _is_backend_available(backend)
+
+    configured = (
+        cfg.get("extract_backend")
+        or cfg.get("backend")
+        or ""
+    )
+    if str(configured).strip():
+        return False
+
+    return any(
+        _is_backend_available(candidate)
+        for candidate in _WEB_EXTRACT_BACKENDS
+    )
+
+
+def check_web_api_key() -> bool:
+    """Check whether any configured web capability is currently available."""
+    return check_web_search_available() or check_web_extract_available()
 
 
 def check_auxiliary_model() -> bool:
@@ -1452,7 +1516,7 @@ registry.register(
     toolset="web",
     schema=WEB_SEARCH_SCHEMA,
     handler=lambda args, **kw: web_search_tool(args.get("query", ""), limit=args.get("limit", 5)),
-    check_fn=check_web_api_key,
+    check_fn=check_web_search_available,
     requires_env=_web_requires_env(),
     emoji="🔍",
     max_result_size_chars=100_000,
@@ -1463,7 +1527,7 @@ registry.register(
     schema=WEB_EXTRACT_SCHEMA,
     handler=lambda args, **kw: web_extract_tool(
         args.get("urls", [])[:5] if isinstance(args.get("urls"), list) else [], "markdown"),
-    check_fn=check_web_api_key,
+    check_fn=check_web_extract_available,
     requires_env=_web_requires_env(),
     is_async=True,
     emoji="📄",
