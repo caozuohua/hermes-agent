@@ -64,14 +64,17 @@ def _normalize_tavily_search_results(response: Dict[str, Any]) -> Dict[str, Any]
     """Map Tavily ``/search`` response to ``{success, data: {web: [...]}}``."""
     web_results = []
     for i, result in enumerate(response.get("results", [])):
-        web_results.append(
-            {
-                "title": result.get("title", ""),
-                "url": result.get("url", ""),
-                "description": result.get("content", ""),
-                "position": i + 1,
-            }
-        )
+        normalized = {
+            "title": result.get("title", ""),
+            "url": result.get("url", ""),
+            "description": result.get("content", ""),
+            "position": i + 1,
+        }
+        if result.get("published_date"):
+            normalized["published_date"] = result.get("published_date")
+        if result.get("score") is not None:
+            normalized["score"] = result.get("score")
+        web_results.append(normalized)
     return {"success": True, "data": {"web": web_results}}
 
 
@@ -129,6 +132,16 @@ def _normalize_tavily_documents(
 class TavilyWebSearchProvider(WebSearchProvider):
     """Tavily search + extract provider."""
 
+    _LIVE_SPORTS_DOMAINS = [
+        "fifa.com",
+        "espn.com",
+        "cbssports.com",
+        "foxsports.com",
+        "bbc.com",
+        "reuters.com",
+        "theguardian.com",
+    ]
+
     @property
     def name(self) -> str:
         return "tavily"
@@ -172,8 +185,27 @@ class TavilyWebSearchProvider(WebSearchProvider):
             )
             or any(term in q for term in ("对比", "比较", "深入", "详细", "分析", "综述", "论文", "评测", "为什么", "如何"))
         )
+        wants_live_sports = bool(
+            (
+                re.search(
+                    r"\b(fifa|world cup|soccer|football|score|scores|"
+                    r"fixture|fixtures|schedule|standings|match|matches)\b",
+                    q_lower,
+                )
+                or any(term in q for term in ("世界杯", "足球", "赛程", "赛况", "比分", "实况", "直播", "比赛"))
+            )
+            and (
+                wants_news
+                or re.search(r"\b(live|score|scores|today|current|now)\b", q_lower)
+                or any(term in q for term in ("实时", "今天", "今日", "赛况", "比分", "实况", "直播"))
+            )
+        )
 
-        if wants_depth:
+        if wants_live_sports:
+            depth = "basic"
+            max_results = min(max(limit, 5), 8)
+            include_answer = "basic"
+        elif wants_depth:
             depth = "advanced"
             max_results = min(max(limit, 3), 5)
             include_answer: Any = False
@@ -193,9 +225,17 @@ class TavilyWebSearchProvider(WebSearchProvider):
             "include_raw_content": False,
             "include_images": False,
         }
+        if wants_live_sports:
+            plan["topic"] = "news"
+            plan["time_range"] = "day"
+            plan["days"] = 2
+            plan["include_domains"] = list(TavilyWebSearchProvider._LIVE_SPORTS_DOMAINS)
+            plan["intent"] = "live_sports"
+            return plan
         if wants_news:
             plan["topic"] = "news"
             plan["days"] = 7
+            plan["time_range"] = "week"
         return plan
 
     def search(self, query: str, limit: int = 5) -> Dict[str, Any]:
@@ -215,16 +255,31 @@ class TavilyWebSearchProvider(WebSearchProvider):
                 plan.get("max_results"),
             )
             raw = _tavily_request("search", {"query": query, **plan})
+            domain_retry = False
+            if plan.get("include_domains") and not raw.get("results"):
+                relaxed_plan = dict(plan)
+                relaxed_plan.pop("include_domains", None)
+                raw = _tavily_request("search", {"query": query, **relaxed_plan})
+                plan = relaxed_plan
+                domain_retry = True
             normalized = _normalize_tavily_search_results(raw)
             if raw.get("answer"):
                 normalized.setdefault("data", {})["answer"] = raw.get("answer")
-            normalized.setdefault("data", {})["strategy"] = {
+            strategy = {
                 "backend": "tavily",
                 "search_depth": plan.get("search_depth"),
                 "topic": plan.get("topic", "general"),
                 "days": plan.get("days"),
+                "time_range": plan.get("time_range"),
                 "max_results": plan.get("max_results"),
             }
+            if plan.get("include_domains"):
+                strategy["include_domains"] = plan.get("include_domains")
+            if plan.get("intent"):
+                strategy["intent"] = plan.get("intent")
+            if domain_retry:
+                strategy["domain_retry"] = True
+            normalized.setdefault("data", {})["strategy"] = strategy
             return normalized
         except ValueError as exc:
             return {"success": False, "error": str(exc)}

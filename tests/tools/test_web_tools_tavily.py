@@ -99,6 +99,23 @@ class TestNormalizeTavilySearchResults:
         assert web[0]["url"] == ""
         assert web[0]["description"] == ""
 
+    def test_preserves_freshness_metadata(self):
+        from tools.web_tools import _normalize_tavily_search_results
+
+        result = _normalize_tavily_search_results({
+            "results": [{
+                "title": "Live scoreboard",
+                "url": "https://www.espn.com/soccer/scoreboard",
+                "content": "Latest scores",
+                "score": 0.94,
+                "published_date": "2026-07-06",
+            }]
+        })
+
+        web = result["data"]["web"]
+        assert web[0]["published_date"] == "2026-07-06"
+        assert web[0]["score"] == 0.94
+
 
 # ─── _normalize_tavily_documents ──────────────────────────────────────────────
 
@@ -190,6 +207,75 @@ class TestWebSearchTavily:
             assert result["success"] is True
             assert len(result["data"]["web"]) == 1
             assert result["data"]["web"][0]["title"] == "Result"
+
+    def test_live_sports_plan_uses_fresh_news_and_trusted_domains(self):
+        from plugins.web.tavily.provider import TavilyWebSearchProvider
+
+        plan = TavilyWebSearchProvider._search_plan("搜索世界杯实时比分和今日赛程", limit=3)
+
+        assert plan["topic"] == "news"
+        assert plan["time_range"] == "day"
+        assert plan["max_results"] >= 5
+        assert "fifa.com" in plan["include_domains"]
+        assert "espn.com" in plan["include_domains"]
+
+    def test_search_strategy_reports_freshness_and_domain_focus(self):
+        captured_payload = {}
+
+        def fake_request(endpoint, payload):
+            captured_payload.update(payload)
+            return {
+                "answer": "Latest scoreboard summary",
+                "results": [{
+                    "title": "World Cup scores",
+                    "url": "https://www.espn.com/soccer/scoreboard",
+                    "content": "Live scores",
+                    "published_date": "2026-07-06",
+                    "score": 0.91,
+                }],
+            }
+
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
+             patch("plugins.web.tavily.provider._tavily_request", side_effect=fake_request), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            from plugins.web.tavily.provider import TavilyWebSearchProvider
+
+            result = TavilyWebSearchProvider().search("搜索世界杯实时比分和今日赛程", limit=3)
+
+        assert captured_payload["topic"] == "news"
+        assert captured_payload["time_range"] == "day"
+        assert "fifa.com" in captured_payload["include_domains"]
+        assert result["data"]["strategy"]["time_range"] == "day"
+        assert result["data"]["strategy"]["include_domains"] == captured_payload["include_domains"]
+        assert result["data"]["web"][0]["published_date"] == "2026-07-06"
+
+    def test_live_sports_search_retries_without_domain_filter_when_empty(self):
+        payloads = []
+
+        def fake_request(endpoint, payload):
+            payloads.append(dict(payload))
+            if "include_domains" in payload:
+                return {"results": []}
+            return {
+                "results": [{
+                    "title": "Fallback live scoreboard",
+                    "url": "https://www.example.com/live",
+                    "content": "Live score found after relaxing domains",
+                }]
+            }
+
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
+             patch("plugins.web.tavily.provider._tavily_request", side_effect=fake_request), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            from plugins.web.tavily.provider import TavilyWebSearchProvider
+
+            result = TavilyWebSearchProvider().search("搜索世界杯实时比分和今日赛程", limit=3)
+
+        assert len(payloads) == 2
+        assert "include_domains" in payloads[0]
+        assert "include_domains" not in payloads[1]
+        assert result["data"]["strategy"]["domain_retry"] is True
+        assert result["data"]["web"][0]["title"] == "Fallback live scoreboard"
 
 
 # ─── web_extract_tool (Tavily dispatch) ───────────────────────────────────────
