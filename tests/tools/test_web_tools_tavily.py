@@ -249,6 +249,24 @@ class TestWebSearchTavily:
         assert result["data"]["strategy"]["include_domains"] == captured_payload["include_domains"]
         assert result["data"]["web"][0]["published_date"] == "2026-07-06"
 
+    def test_chinese_world_cup_live_query_expands_search_terms(self):
+        captured_payload = {}
+
+        def fake_request(endpoint, payload):
+            captured_payload.update(payload)
+            return {"results": []}
+
+        with patch.dict(os.environ, {"TAVILY_API_KEY": "tvly-test"}), \
+             patch("plugins.web.tavily.provider._tavily_request", side_effect=fake_request), \
+             patch("tools.interrupt.is_interrupted", return_value=False):
+            from plugins.web.tavily.provider import TavilyWebSearchProvider
+
+            result = TavilyWebSearchProvider().search("搜索世界杯实时比分和今日赛程", limit=3)
+
+        assert "搜索世界杯实时比分和今日赛程" in captured_payload["query"]
+        assert "FIFA World Cup live scores fixtures today" in captured_payload["query"]
+        assert result["data"]["strategy"]["query_expanded"] is True
+
     def test_live_sports_search_retries_without_domain_filter_when_empty(self):
         payloads = []
 
@@ -310,4 +328,3 @@ class TestWebExtractTavily:
             assert "results" in result
             assert len(result["results"]) == 1
             assert result["results"][0]["url"] == "https://example.com"
-

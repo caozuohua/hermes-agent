@@ -231,6 +231,10 @@ class TavilyWebSearchProvider(WebSearchProvider):
             plan["days"] = 2
             plan["include_domains"] = list(TavilyWebSearchProvider._LIVE_SPORTS_DOMAINS)
             plan["intent"] = "live_sports"
+            if "世界杯" in q:
+                plan["_query_suffix"] = "FIFA World Cup live scores fixtures today"
+            elif any(term in q for term in ("足球", "赛程", "赛况", "比分", "实况", "直播", "比赛")):
+                plan["_query_suffix"] = "live scores fixtures today"
             return plan
         if wants_news:
             plan["topic"] = "news"
@@ -254,12 +258,19 @@ class TavilyWebSearchProvider(WebSearchProvider):
                 plan.get("topic", "general"),
                 plan.get("max_results"),
             )
-            raw = _tavily_request("search", {"query": query, **plan})
+            query_suffix = plan.pop("_query_suffix", "")
+            search_query = query
+            query_expanded = False
+            if query_suffix and query_suffix.lower() not in (query or "").lower():
+                search_query = f"{query} {query_suffix}".strip()
+                query_expanded = True
+
+            raw = _tavily_request("search", {"query": search_query, **plan})
             domain_retry = False
             if plan.get("include_domains") and not raw.get("results"):
                 relaxed_plan = dict(plan)
                 relaxed_plan.pop("include_domains", None)
-                raw = _tavily_request("search", {"query": query, **relaxed_plan})
+                raw = _tavily_request("search", {"query": search_query, **relaxed_plan})
                 plan = relaxed_plan
                 domain_retry = True
             normalized = _normalize_tavily_search_results(raw)
@@ -277,6 +288,8 @@ class TavilyWebSearchProvider(WebSearchProvider):
                 strategy["include_domains"] = plan.get("include_domains")
             if plan.get("intent"):
                 strategy["intent"] = plan.get("intent")
+            if query_expanded:
+                strategy["query_expanded"] = True
             if domain_retry:
                 strategy["domain_retry"] = True
             normalized.setdefault("data", {})["strategy"] = strategy
