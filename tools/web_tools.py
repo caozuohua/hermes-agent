@@ -141,6 +141,7 @@ _WEB_SEARCH_BACKENDS = frozenset({
     "searxng",
     "brave-free",
     "ddgs",
+    "gemini-grounded",
     "xai",
 })
 
@@ -185,6 +186,7 @@ def _get_backend() -> str:
         ("firecrawl", _is_tool_gateway_ready()),
         ("searxng", _has_env("SEARXNG_URL")),
         ("brave-free", _has_env("BRAVE_SEARCH_API_KEY")),
+        ("gemini-grounded", _has_env("GEMINI_API_KEY") or _has_env("GOOGLE_API_KEY")),
         ("ddgs", _ddgs_package_importable()),
     )
     for backend, available in backend_candidates:
@@ -310,6 +312,8 @@ def _is_backend_available(backend: str) -> bool:
         return _has_env("BRAVE_SEARCH_API_KEY")
     if backend == "ddgs":
         return _ddgs_package_importable()
+    if backend == "gemini-grounded":
+        return _has_env("GEMINI_API_KEY") or _has_env("GOOGLE_API_KEY")
     if backend == "xai":
         # Cheap probe — env var OR auth.json has OAuth tokens. Must not
         # call resolve_xai_http_credentials() here because the OAuth path
