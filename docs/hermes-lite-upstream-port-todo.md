@@ -78,9 +78,9 @@ Notes:
 
 ## Review Checkpoint - 2026-07-05
 
-Last reviewed upstream main: `605727e3b` (2026-07-05).
+Last reviewed upstream main: `2ea39daeb` (2026-07-16).
 
-Next review should scan only `605727e3b..origin/main`, plus the deferred
+Next review should scan only `2ea39daeb..origin/main`, plus the deferred
 watchlist below. Do not re-triage the full fork gap unless the base branch is
 rebuilt.
 
@@ -142,9 +142,30 @@ Notes:
     `✓ feishu connected`, and `Gateway running with 1 platform(s)` at
     2026-07-05 16:37:59 UTC.
 
+### Batch 6 - WAL Safety And Gateway Event-Loop Responsiveness
+
+- [x] `c2a3b9ce5` fix(state): use PASSIVE checkpoint for periodic WAL flush
+- [x] `24ea21993` fix(gateway): offload session store calls via asyncio.to_thread
+- [x] `94c2a4016` fix(gateway): offload compression-in-flight blocking probes
+- [x] `08e9dcf18` fix(gateway): move SessionStore I/O outside its lock
+
+Notes:
+- The SessionStore port keeps the Lite JSON routing index and omits full-Hermes
+  profile/multiplex helpers. Snapshot persistence uses the existing temp-file,
+  fsync, and atomic-replace path.
+- `.claude/settings.json` from `94c2a4016` was intentionally omitted because it
+  contains upstream developer-machine permissions, not runtime code.
+- Local focused verification on 2026-07-16: WAL checkpoint strategy, gateway
+  compression-in-flight, and SessionStore lock/I/O tests -> 14 passed.
+- VPS pre-deployment state: service active with zero systemd restarts, state.db
+  quick-check `ok`; one Lark keepalive timeout was logged and the connection
+  subsequently re-established without a service restart.
+
 Deferred:
-- `origin/fix/feishu-ws-close-frame` (`1a296b96d`, `91e080583`) - wait until
-  it reaches upstream main or Feishu disconnects reproduce on Lite.
+- `origin/fix/feishu-ws-close-frame` (`1a296b96d`, `91e080583`) remains outside
+  upstream main. The observed keepalive timeout does not establish that its
+  outbound CLOSE-frame cleanup is the remedy, so keep watching rather than
+  importing an unmerged patch.
 
 Skipped for Lite:
 - Desktop, TUI, MCP, Computer Use, STT/TTS, image/vision, WhatsApp, Discord,
