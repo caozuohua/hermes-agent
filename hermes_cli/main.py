@@ -8395,10 +8395,10 @@ def _resolve_update_branch(args) -> str:
     ``--branch`` (check path, git-update path, ZIP-fallback path) agrees on
     the same answer.
     """
-    return (getattr(args, "branch", None) or "main").strip() or "main"
+    return (getattr(args, "branch", None) or "azure-hermes").strip() or "azure-hermes"
 
 
-def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):
+def _cmd_update_check(branch: str = "azure-hermes", *, branch_explicit: bool = False):
     """Implement ``hermes update --check``: fetch and report without installing.
 
     ``branch`` selects which branch the check compares against. Default is
