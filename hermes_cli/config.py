@@ -3317,6 +3317,11 @@ DEFAULT_CONFIG = {
 
     # ``hermes update`` behaviour.
     "updates": {
+        # Git branch used when ``hermes update`` is invoked without an explicit
+        # ``--branch``. This keeps fork deployments on a tested release branch
+        # across CLI, dashboard, desktop, and gateway-triggered updates without
+        # hard-coding deployment policy into the updater.
+        "branch": "main",
         # Pre-update safety backup — ONE consolidated mechanism, three modes:
         #
         #   quick (default) — snapshot critical small state files (pairing

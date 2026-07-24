@@ -919,6 +919,14 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         ),
         "options": ["stash", "discard"],
     },
+    "updates.branch": {
+        "type": "string",
+        "description": (
+            "Git branch used by Hermes updates when --branch is not supplied. "
+            "Useful for deployments that consume a tested release branch from "
+            "a fork. Defaults to main."
+        ),
+    },
     "updates.refresh_cua_driver": {
         "type": "bool",
         "description": (

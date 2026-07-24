@@ -62,7 +62,17 @@ In the desktop app this is **Settings → Advanced → In-App Update Local Chang
 
 ### Preview-only: `hermes update --check`
 
-Want to know if an update is available before pulling? Run `hermes update --check` — it fetches and compares commits against `origin/main`. No files are modified, no gateway is restarted. Useful in scripts and cron jobs that gate on "is there an update".
+Want to know if an update is available before pulling? Run `hermes update --check` — it fetches and compares commits against the configured `updates.branch` (`main` by default). No files are modified, no gateway is restarted. Useful in scripts and cron jobs that gate on "is there an update".
+
+Fork deployments can keep every update surface on a tested release branch:
+
+```yaml
+# ~/.hermes/config.yaml
+updates:
+  branch: stable
+```
+
+An explicit `hermes update --branch <name>` overrides this setting for one run.
 
 ### Full pre-update backup: `--backup`
 
