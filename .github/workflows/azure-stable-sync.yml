@@ -1,0 +1,70 @@
+name: Sync Azure stable
+
+on:
+  workflow_dispatch:
+    inputs:
+      upstream_ref:
+        description: NousResearch/hermes-agent branch or tag to promote
+        required: true
+        default: main
+        type: string
+  schedule:
+    - cron: "17 6 * * 1"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: azure-stable-sync
+  cancel-in-progress: false
+
+jobs:
+  promote:
+    if: github.repository == 'caozuohua/hermes-agent'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+
+    steps:
+      - name: Check out the deployed branch
+        uses: actions/checkout@de0fac2e4500dabe0009e67214ff5f5447ce83dd # v6.0.2
+        with:
+          ref: azure-stable
+          fetch-depth: 0
+
+      - name: Merge the requested upstream revision
+        env:
+          UPSTREAM_REF: ${{ inputs.upstream_ref || 'main' }}
+        run: |
+          git config user.name "azure-stable-sync[bot]"
+          git config user.email "azure-stable-sync[bot]@users.noreply.github.com"
+          git fetch --no-tags https://github.com/NousResearch/hermes-agent.git \
+            "${UPSTREAM_REF}"
+          git merge --no-edit FETCH_HEAD
+          git diff --check
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@fac544c07dec837d0ccb6301d7b5580bf5edae39 # 8.2.0
+        with:
+          enable-cache: true
+          cache-dependency-glob: |
+            pyproject.toml
+            uv.lock
+
+      - name: Install Python and test dependencies
+        run: |
+          uv python install 3.11
+          uv sync --locked --python 3.11 --extra all --extra dev
+
+      - name: Validate the Azure update and search paths
+        run: |
+          source .venv/bin/activate
+          python -m compileall -q hermes_cli gateway plugins/web
+          scripts/run_tests.sh \
+            tests/hermes_cli/test_cmd_update.py \
+            tests/gateway/test_update_command.py \
+            tests/gateway/test_update_streaming.py \
+            tests/tools/test_azure_lite_ports_tavily.py \
+            tests/tools/test_web_providers_gemini_grounded.py
+
+      - name: Promote only the tested commit
+        run: git push origin HEAD:azure-stable
