@@ -221,6 +221,84 @@ def test_check_via_local_git_full_clone_keeps_exact_count(tmp_path):
     assert result == 7
 
 
+def test_check_via_local_git_uses_configured_branch(tmp_path):
+    """Managed fork checks compare against their promoted deployment branch."""
+    import hermes_cli.banner as banner
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    calls = []
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        if cmd == ["git", "remote", "get-url", "origin"]:
+            return MagicMock(
+                returncode=0,
+                stdout="https://github.com/example/hermes-agent.git\n",
+            )
+        if cmd == ["git", "rev-parse", "--is-shallow-repository"]:
+            return MagicMock(returncode=0, stdout="false\n")
+        if cmd[:2] == ["git", "fetch"]:
+            return MagicMock(returncode=0, stdout="")
+        if cmd == [
+            "git",
+            "rev-list",
+            "--count",
+            "HEAD..origin/azure-stable",
+        ]:
+            return MagicMock(returncode=0, stdout="0\n")
+        raise AssertionError(f"unexpected git command: {cmd!r}")
+
+    with patch("hermes_cli.banner.subprocess.run", side_effect=fake_run):
+        result = banner._check_via_local_git(repo_dir, "azure-stable")
+
+    assert result == 0
+    assert [
+        "git",
+        "rev-list",
+        "--count",
+        "HEAD..origin/azure-stable",
+    ] in calls
+
+
+def test_git_banner_state_uses_configured_branch(tmp_path):
+    """Version output hashes and carried commits use the deployment branch."""
+    import hermes_cli.banner as banner
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+
+    refs = []
+
+    def fake_hash(_repo_dir, ref):
+        refs.append(ref)
+        return "stable123" if ref == "origin/azure-stable" else "local456"
+
+    with patch(
+        "hermes_cli.config.load_config",
+        return_value={"updates": {"branch": "azure-stable"}},
+    ), patch(
+        "hermes_cli.banner._git_short_hash",
+        side_effect=fake_hash,
+    ), patch(
+        "hermes_cli.banner.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="2\n"),
+    ) as mock_run:
+        state = banner.get_git_banner_state(repo_dir)
+
+    assert state == {"upstream": "stable123", "local": "local456", "ahead": 2}
+    assert refs == ["origin/azure-stable", "HEAD"]
+    assert mock_run.call_args.args[0] == [
+        "git",
+        "rev-list",
+        "--count",
+        "origin/azure-stable..HEAD",
+    ]
+
+
 def test_check_for_updates_no_git_dir(tmp_path, monkeypatch):
     """Returns None when .git directory doesn't exist anywhere (no source tree)."""
     import hermes_cli.banner as banner

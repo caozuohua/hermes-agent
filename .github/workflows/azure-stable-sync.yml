@@ -61,6 +61,7 @@ jobs:
           python -m compileall -q hermes_cli gateway plugins/web
           scripts/run_tests.sh \
             tests/hermes_cli/test_cmd_update.py \
+            tests/hermes_cli/test_update_check.py \
             tests/gateway/test_update_command.py \
             tests/gateway/test_update_streaming.py \
             tests/tools/test_azure_lite_ports_tavily.py \
