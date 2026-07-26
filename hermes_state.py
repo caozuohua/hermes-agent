@@ -15,6 +15,7 @@ Key design decisions:
 """
 
 import asyncio
+import contextlib
 import json
 import logging
 import os
@@ -56,12 +57,6 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
     remain protected until normal TTL expiry (conservative: PID reuse must
     never steal a live lease, and a wrongly-kept lease self-heals via TTL).
     """
-    # Windows stays TTL-only: stdlib os.kill(pid, 0) is NOT a no-op probe
-    # there (bpo-14484 — sig=0 maps to CTRL_C_EVENT and can kill the target's
-    # console group), and PID recycling semantics make liveness a weaker
-    # deadness signal. The 300s lease TTL remains the recovery path.
-    if os.name == "nt":
-        return False
     match = _COMPRESSION_LOCK_HOLDER_PID_RE.search(holder or "")
     if match is None:
         return False
@@ -83,10 +78,14 @@ def _compression_lock_holder_process_is_dead(holder: str) -> bool:
             return not psutil.pid_exists(pid)
         except Exception:
             return False  # any doubt → keep the lease until TTL expiry
-    # Scaffold-phase fallback only (psutil missing). POSIX-only by the
-    # os.name gate above.
+    # Scaffold-phase fallback only (psutil missing), and POSIX-only: stdlib
+    # os.kill(pid, 0) is NOT a no-op probe on Windows (bpo-14484 — sig=0 maps
+    # to CTRL_C_EVENT and can kill the target's console group). Without psutil
+    # a Windows host stays TTL-only; the lease TTL remains the recovery path.
+    if os.name == "nt":
+        return False
     try:
-        os.kill(pid, 0)  # windows-footgun: ok — function early-returns on nt above
+        os.kill(pid, 0)  # windows-footgun: ok — nt early-returns just above
     except ProcessLookupError:
         return True
     except (PermissionError, OSError, OverflowError):
@@ -531,6 +530,17 @@ def apply_wal_with_fallback(
     (prefer DELETE).  If the on-disk DB is already WAL, keep WAL and warn
     — never live-downgrade under possible concurrent openers.
 
+    This gate (#70055) is deliberately RETAINED. An earlier revision of the
+    lock-cancellation fix (#71724) reverted it on the theory that DELETE was
+    "the mode that corrupts", but that comparison was confounded: the clean
+    WAL result came from SQLite 3.53.1, which carries BOTH the WAL-reset fix
+    AND 3.51.0's defenses against close()-broken POSIX locks, so it says
+    nothing about 3.50.4.  Re-measured on the actually-bundled 3.50.4 with
+    the lock fix in place, WAL and DELETE are both clean (0/3 each) — i.e.
+    there is no evidence that WAL is safer here, and upstream still documents
+    the WAL-reset bug as real through 3.51.2 with serious consequences.  Until
+    a fixed runtime is delivered, keep new databases out of WAL.
+
     The WARNING is deduplicated per ``db_label``: repeated connections
     to the same underlying DB (e.g. kanban_db.connect() which is called
     on every kanban operation) log once per process, not once per call.
@@ -730,9 +740,29 @@ def _backup_db_file(db_path: Path) -> Optional[Path]:
     Raw file copy on purpose: the DB won't open cleanly, so we preserve the
     bytes exactly for forensics / manual restore. WAL and SHM sidecars are
     copied too when present. Returns the backup path, or None on failure.
+
+    Refuses when a connection to this database is still live in the process:
+    reading the file would ``close()`` a descriptor for it and cancel that
+    connection's POSIX advisory locks (see ``hermes_cli.sqlite_safe_read``).
+    The repair path can be entered by one SessionDB while the gateway holds
+    others, so this is a real possibility rather than a theoretical one.
     """
     import datetime
     import shutil
+
+    try:
+        from hermes_cli.sqlite_safe_read import has_live_connection
+    except ImportError:
+        has_live_connection = None  # type: ignore[assignment]
+
+    if has_live_connection is not None and has_live_connection(db_path):
+        logger.error(
+            "Refusing to raw-copy %s for backup: a connection to it is still "
+            "open in this process and the copy would cancel that connection's "
+            "POSIX locks. Close all SessionDB handles first.",
+            db_path,
+        )
+        return None
 
     stamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
     backup_path = db_path.with_name(f"{db_path.name}.malformed-backup-{stamp}")
@@ -1575,6 +1605,194 @@ class CompressionSessionBusyError(RuntimeError):
     """A non-owner tried to write while compression owns the session."""
 
 
+def _connect_tracked_db(path, tracking_path=None, **kwargs):
+    """``sqlite3.connect`` that registers the open fd for lock-safety.
+
+    While a connection is live, byte-level probes of the same file are
+    refused: an ``open()``/``close()`` cancels every POSIX advisory lock this
+    process holds on it -- including a running VACUUM's EXCLUSIVE lock.
+    Released automatically on ``close()``.
+
+    The ONLY tolerated fallback is the helper being absent entirely
+    (scaffold/embed installs that ship hermes_state without hermes_cli). A
+    real connection failure must propagate: silently retrying an *untracked*
+    connect would disable the guard for the lifetime of that connection,
+    which is precisely the failure mode this module exists to prevent.
+    """
+    try:
+        from hermes_cli.sqlite_safe_read import connect_tracked
+    except ImportError:
+        logger.debug(
+            "hermes_cli.sqlite_safe_read unavailable; opening %s untracked "
+            "(byte-probe guard inactive in this install)",
+            path,
+        )
+        return sqlite3.connect(str(path), **kwargs)
+
+    # Open through THIS module's sqlite3.connect so callers (and tests) that
+    # patch hermes_state.sqlite3.connect keep control of connection creation;
+    # the helper still owns tracking.
+    return connect_tracked(
+        path,
+        tracking_path=tracking_path,
+        connect_fn=sqlite3.connect,
+        **kwargs,
+    )
+
+
+def is_zeroed_state_db(
+    path: Path, *, probe_bytes: int = 100, force: bool = False
+) -> bool:
+    """Detect the #68474 zeroed state.db signature (size>0, NUL header).
+
+    Byte-level probe, so it is only safe BEFORE any connection to *path*
+    exists in this process: ``close()`` cancels every POSIX advisory lock the
+    process holds on the file, which can pull the EXCLUSIVE lock out from
+    under a running VACUUM and corrupt the database. The read is routed
+    through ``read_header_bytes_preopen``, which refuses (returning False
+    here) once a connection is live. Pass ``force=True`` only for offline
+    files -- quarantined copies, snapshots, archives.
+
+    Prefer ``hermes_cli.backup.is_zeroed_sqlite_file`` when available; this
+    local copy keeps SessionDB openable without importing the CLI package
+    in constrained embed paths.
+    """
+    try:
+        from hermes_cli.backup import is_zeroed_sqlite_file
+
+        return is_zeroed_sqlite_file(path, probe_bytes=probe_bytes, force=force)
+    except Exception:
+        pass
+    try:
+        size = path.stat().st_size
+    except OSError:
+        return False
+    if size <= 0:
+        return False
+    from hermes_cli.sqlite_safe_read import read_header_bytes_preopen
+
+    head = read_header_bytes_preopen(
+        path, length=max(16, probe_bytes), force=force
+    )
+    if not head or head.startswith(b"SQLite format 3"):
+        return False
+    return all(byte == 0 for byte in head)
+
+
+def quarantine_zeroed_state_db(path: Path) -> Optional[Path]:
+    """Move a zeroed state.db aside (preserve bytes) and return quarantine path.
+
+    Uses a cross-process lock (``#68805``) so two concurrent startups cannot
+    race: the first process moves the zeroed file and the second re-checks
+    under the lock, finding the file already gone (or a fresh DB in its place)
+    instead of clobbering the quarantine.
+    """
+    import platform
+
+    lock_path = path.with_name(path.name + ".quarantine.lock")
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    handle = lock_path.open("a+b")
+    acquired = False
+    try:
+        deadline = time.monotonic() + 5.0
+        if platform.system() == "Windows":
+            import msvcrt
+            while True:
+                try:
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_NBLCK, 1)
+                    acquired = True
+                    break
+                except OSError:
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.020)
+        else:
+            import fcntl
+            while True:
+                try:
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                    acquired = True
+                    break
+                except (BlockingIOError, OSError):
+                    if time.monotonic() >= deadline:
+                        break
+                    time.sleep(0.020)
+        if not acquired:
+            # Fail closed: do NOT proceed without the lock. A slow or paused
+            # startup that still owns the lock can overlap this fallback and
+            # the two processes can act on the same live file (#68805 review).
+            logger.error(
+                "quarantine lock for %s not acquired within 5s — refusing to "
+                "quarantine without the cross-process lock. The zeroed file "
+                "is left in place. If sessions fail to load, restore from "
+                "state-snapshots via `hermes snapshot list` / "
+                "`hermes snapshot restore <id>`.",
+                path,
+            )
+            return None
+        # Re-check under the lock: another process may have already quarantined
+        # the file, leaving a fresh DB (or no file at all) in its place.
+        if not path.exists():
+            logger.info(
+                "quarantine_zeroed_state_db: %s already moved by another process",
+                path,
+            )
+            return None
+        if not is_zeroed_state_db(path):
+            logger.info(
+                "quarantine_zeroed_state_db: %s is no longer zeroed (another "
+                "process quarantined it and a fresh DB was created)",
+                path,
+            )
+            return None
+
+        try:
+            ts = time.strftime("%Y%m%d-%H%M%S")
+        except Exception:
+            ts = "unknown"
+        # Unique destination with PID suffix to avoid collision across
+        # concurrent startups that somehow both enter the lock.
+        dest = path.with_name(
+            f"{path.name}.zeroed-{ts}-{os.getpid()}.bak"
+        )
+        # Non-clobbering: if dest somehow exists, append a counter.
+        n = 0
+        while dest.exists():
+            n += 1
+            dest = path.with_name(
+                f"{path.name}.zeroed-{ts}-{os.getpid()}-{n}.bak"
+            )
+        try:
+            path.rename(dest)
+        except OSError as exc:
+            logger.error("Failed to quarantine zeroed %s: %s", path, exc)
+            return None
+        # Also move empty WAL/SHM if present so a fresh open is clean
+        for suffix in ("-wal", "-shm"):
+            side = Path(str(path) + suffix)
+            if side.exists():
+                try:
+                    side.rename(Path(str(dest) + suffix))
+                except OSError:
+                    pass
+        return dest
+    finally:
+        try:
+            if acquired:
+                if platform.system() == "Windows":
+                    import msvcrt
+                    handle.seek(0)
+                    msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+                else:
+                    import fcntl
+                    fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        except (OSError, AttributeError):
+            pass
+        finally:
+            handle.close()
+
+
 class SessionDB:
     """
     SQLite-backed session storage with FTS5 search.
@@ -1649,8 +1867,9 @@ class SessionDB:
                 # must already exist + be initialised (callers guard on
                 # db_path.exists()); a SELECT against an empty file raises and
                 # the caller degrades per-profile.
-                self._conn = sqlite3.connect(
+                self._conn = _connect_tracked_db(
                     f"file:{self.db_path}?mode=ro",
+                    tracking_path=self.db_path,
                     uri=True,
                     check_same_thread=False,
                     timeout=1.0,
@@ -1661,8 +1880,37 @@ class SessionDB:
 
             self.db_path.parent.mkdir(parents=True, exist_ok=True)
 
+            # #68474: zeroed state.db (size>0, all-NUL header) used to fail as a
+            # generic "file is not a database" with no recovery path. Quarantine
+            # the bytes (do not delete) and continue so a fresh DB can open;
+            # point the operator at pre-update snapshots.
+            if (
+                not read_only
+                and self.db_path.exists()
+                and is_zeroed_state_db(self.db_path)
+            ):
+                try:
+                    zsize = self.db_path.stat().st_size
+                except OSError:
+                    zsize = -1
+                qpath = quarantine_zeroed_state_db(self.db_path)
+                snaps = self.db_path.parent / "state-snapshots"
+                msg = (
+                    f"state.db looks ZEROED ({zsize} bytes, no SQLite header). "
+                    f"Preserved at {qpath or '(quarantine failed — file left in place)'}. "
+                    f"Restore from {snaps} via `hermes snapshot list` / "
+                    f"`hermes snapshot restore <id>` if available. "
+                    "Opening a fresh empty database so the agent can start."
+                )
+                logger.error(msg)
+                _set_last_init_error(msg)
+                # If quarantine failed, do not open the zeroed file (would fail
+                # opaquely or risk further damage). Raise with the clear message.
+                if qpath is None and self.db_path.exists() and is_zeroed_state_db(self.db_path):
+                    raise sqlite3.DatabaseError(msg)
+
             def _connect_and_init():
-                self._conn = sqlite3.connect(
+                self._conn = _connect_tracked_db(
                     str(self.db_path),
                     check_same_thread=False,
                     # Short timeout — application-level retry with random
@@ -4342,7 +4590,24 @@ class SessionDB:
         holder: str,
         ttl_seconds: float = 300.0,
     ) -> bool:
-        """Extend the compression lock lease if ``holder`` still owns it."""
+        """Extend the compression lock lease if ``holder`` still owns it.
+
+        Ownership is decided by the ``holder`` column alone, deliberately NOT
+        by ``expires_at``: a live owner whose refresher thread was starved
+        (GC pause, loaded CI runner, a slow write escaping ``_execute_write``'s
+        retry budget) past its own TTL must be able to revive its still-unclaimed
+        row on the next tick. Requiring ``expires_at >= now`` here made such a
+        stall permanent — every later refresh matched 0 rows, so the owner kept
+        compressing and rotating with no lease at all, which is exactly the
+        unprotected window a competing path can fork the session lineage in.
+
+        This does not resurrect a lock somebody else already took: SQLite
+        serialises writes, so a reclaim (DELETE-expired + INSERT-or-IGNORE in
+        :meth:`try_acquire_compression_lock`) and this UPDATE never interleave.
+        Reclaim-first replaces ``holder``, so this UPDATE matches nothing and
+        returns False; refresh-first pushes ``expires_at`` into the future, so
+        the reclaimer's DELETE-expired matches nothing and its acquire fails.
+        """
         if not session_id or not holder:
             return False
         now = time.time()
@@ -4351,8 +4616,8 @@ class SessionDB:
         def _do(conn):
             cur = conn.execute(
                 "UPDATE compression_locks SET expires_at = ? "
-                "WHERE session_id = ? AND holder = ? AND expires_at >= ?",
-                (expires_at, session_id, holder, now),
+                "WHERE session_id = ? AND holder = ?",
+                (expires_at, session_id, holder),
             )
             return cur.rowcount > 0
 
