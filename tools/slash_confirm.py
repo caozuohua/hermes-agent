@@ -1,8 +1,8 @@
 """Generic slash-command confirmation primitive (gateway-side).
 
 Slash commands that have a non-destructive but expensive side effect worth
-surfacing to the user (currently only ``/reload-mcp``, which invalidates
-the provider prompt cache) route through this module.
+surfacing to the user (including ``/reload-mcp`` and ``/update``) route
+through this module.
 
 Two delivery paths:
 

@@ -304,6 +304,119 @@ class TestFeishuUpdatePrompt:
 
 
 # ===========================================================================
+# send_slash_confirm — Once / Always / Cancel interactive card
+# ===========================================================================
+
+class TestFeishuSlashConfirm:
+    """Test generic slash confirmations use a native Feishu card."""
+
+    @pytest.mark.asyncio
+    async def test_sends_three_button_interactive_card(self):
+        adapter = _make_adapter()
+        mock_response = SimpleNamespace(
+            success=lambda: True,
+            data=SimpleNamespace(message_id="msg_sc_001"),
+        )
+
+        with patch.object(
+            adapter,
+            "_feishu_send_with_retry",
+            new_callable=AsyncMock,
+            return_value=mock_response,
+        ) as mock_send:
+            result = await adapter.send_slash_confirm(
+                chat_id="oc_12345",
+                title="/update",
+                message=(
+                    "Update from `origin/hermes-lite-local`?\n\n"
+                    "_Text fallback: reply `/approve`._"
+                ),
+                session_key="agent:main:feishu:dm:oc_12345",
+                confirm_id="42",
+                metadata={"reply_to_message_id": "om_1"},
+            )
+
+        assert result.success is True
+        kwargs = mock_send.call_args.kwargs
+        assert kwargs["msg_type"] == "interactive"
+        assert kwargs["metadata"] == {"reply_to_message_id": "om_1"}
+
+        card = json.loads(kwargs["payload"])
+        assert card["header"]["template"] == "orange"
+        assert "origin/hermes-lite-local" in card["elements"][0]["content"]
+        assert "Text fallback" not in card["elements"][0]["content"]
+        actions = card["elements"][1]["actions"]
+        assert [
+            action["value"]["hermes_slash_confirm_action"]
+            for action in actions
+        ] == ["once", "always", "cancel"]
+        assert {
+            action["value"]["slash_confirm_id"]
+            for action in actions
+        } == {"42"}
+        assert adapter._slash_confirm_state["42"] == {
+            "session_key": "agent:main:feishu:dm:oc_12345",
+            "message_id": "msg_sc_001",
+            "chat_id": "oc_12345",
+            "metadata": {"reply_to_message_id": "om_1"},
+        }
+
+    @pytest.mark.asyncio
+    async def test_not_connected(self):
+        adapter = _make_adapter()
+        adapter._client = None
+
+        result = await adapter.send_slash_confirm(
+            chat_id="oc_12345",
+            title="/update",
+            message="Confirm",
+            session_key="session",
+            confirm_id="1",
+        )
+
+        assert result.success is False
+        assert adapter._slash_confirm_state == {}
+
+    @pytest.mark.asyncio
+    async def test_resolution_runs_handler_and_sends_follow_up(self):
+        adapter = _make_adapter()
+        adapter._slash_confirm_state["7"] = {
+            "session_key": "session-7",
+            "message_id": "msg-7",
+            "chat_id": "oc_12345",
+            "metadata": {"thread_id": "thread-7"},
+        }
+
+        with (
+            patch(
+                "tools.slash_confirm.resolve",
+                new_callable=AsyncMock,
+                return_value="⚕ Update started.",
+            ) as mock_resolve,
+            patch.object(
+                adapter,
+                "send",
+                new_callable=AsyncMock,
+            ) as mock_send,
+        ):
+            await adapter._resolve_slash_confirm(
+                "7",
+                "once",
+                "Alice",
+                open_id="ou_user1",
+                chat_id="oc_12345",
+            )
+
+        mock_resolve.assert_awaited_once_with("session-7", "7", "once")
+        mock_send.assert_awaited_once_with(
+            chat_id="oc_12345",
+            content="⚕ Update started.",
+            metadata={"thread_id": "thread-7"},
+        )
+        assert "7" not in adapter._slash_confirm_state
+
+
+# ===========================================================================
 # _resolve_approval — approval state pop + gateway resolution
 # ===========================================================================
 
@@ -686,6 +799,42 @@ class TestCardActionCallbackResponse:
         card = response.card.data
         assert card["header"]["template"] == "red"
         assert "answered: No" in card["header"]["title"]["content"]
+
+    def test_returns_card_for_slash_confirm_once(
+        self,
+        _patch_callback_card_types,
+    ):
+        adapter = _make_adapter()
+        adapter._loop = MagicMock()
+        adapter._loop.is_closed = MagicMock(return_value=False)
+        adapter._allowed_group_users = {"ou_bob"}
+        adapter._slash_confirm_state["12"] = {
+            "session_key": "sess-sc-12",
+            "message_id": "msg-sc-12",
+            "chat_id": "oc_12345",
+            "metadata": {},
+        }
+        data = _make_card_action_data(
+            {
+                "hermes_slash_confirm_action": "once",
+                "slash_confirm_id": "12",
+            },
+            open_id="ou_bob",
+        )
+        adapter._sender_name_cache["ou_bob"] = ("Bob", 9999999999)
+
+        with patch(
+            "asyncio.run_coroutine_threadsafe",
+            side_effect=_close_submitted_coro,
+        ):
+            response = adapter._on_card_action_trigger(data)
+
+        assert response is not None
+        assert response.card is not None
+        card = response.card.data
+        assert card["header"]["template"] == "green"
+        assert "Approved once" in card["header"]["title"]["content"]
+        assert "Bob" in card["elements"][0]["content"]
 
     def test_ignores_missing_update_prompt_id(self, _patch_callback_card_types):
         adapter = _make_adapter()

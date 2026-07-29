@@ -2488,8 +2488,7 @@ class BasePlatformAdapter(ABC):
         Used by the gateway's generic slash-confirm primitive (see
         ``GatewayRunner._request_slash_confirm``) for commands that have a
         non-destructive but expensive side effect the user should explicitly
-        acknowledge — the current caller is ``/reload-mcp``, which
-        invalidates the provider prompt cache.
+        acknowledge, including ``/reload-mcp`` and ``/update``.
 
         Platforms with inline-button support (Telegram, Discord, Slack,
         Matrix, Feishu) should override this to render three buttons:

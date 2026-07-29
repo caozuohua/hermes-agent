@@ -11694,8 +11694,8 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
     # Slash-command confirmation primitive (generic)
     # ------------------------------------------------------------------
     # Used by slash commands that have a non-destructive but expensive
-    # side effect worth an explicit user confirmation (currently only
-    # /reload-mcp, which invalidates the prompt cache).  Two delivery
+    # side effect worth an explicit user confirmation (including
+    # /reload-mcp and /update).  Two delivery
     # paths:
     #   1. Button UI — adapters that override ``send_slash_confirm``
     #      (Telegram, Discord, Slack, Matrix, Feishu) render three
