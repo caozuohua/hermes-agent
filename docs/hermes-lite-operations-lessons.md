@@ -320,6 +320,8 @@ must never target `upstream/main` directly.
 Official Hermes commits continue to be reviewed and ported in small tested
 batches. Automatically merging the full upstream main branch would reintroduce
 the product surfaces removed from Lite and defeats the purpose of this profile.
+A documentation-only release-branch commit is the preferred smoke target when
+validating the full pull, dependency refresh, restart, and reconnect path.
 
 ## Common Misreads
 
