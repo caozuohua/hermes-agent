@@ -7531,7 +7531,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
                 if _cmd_def_inner.name == "profile":
                     return await self._handle_profile_command(event)
                 if _cmd_def_inner.name == "update":
-                    return await self._handle_update_command(event)
+                    async def _do_update_while_running():
+                        return await self._handle_update_command(event)
+
+                    return await self._maybe_confirm_update_slash(
+                        event=event,
+                        execute=_do_update_while_running,
+                    )
                 if _cmd_def_inner.name == "version":
                     return await self._handle_version_command(event)
 
@@ -7931,7 +7937,13 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             return await self._handle_deny_command(event)
 
         if canonical == "update":
-            return await self._handle_update_command(event)
+            async def _do_update():
+                return await self._handle_update_command(event)
+
+            return await self._maybe_confirm_update_slash(
+                event=event,
+                execute=_do_update,
+            )
 
         if canonical == "version":
             return await self._handle_version_command(event)
@@ -11783,6 +11795,83 @@ class GatewayRunner(GatewayAuthorizationMixin, GatewayKanbanWatchersMixin, Gatew
             event=event,
             command=command,
             title=title,
+            message=prompt_message,
+            handler=_on_confirm,
+        )
+
+    async def _maybe_confirm_update_slash(
+        self,
+        *,
+        event: MessageEvent,
+        execute,
+    ) -> Union[str, "EphemeralReply", None]:
+        """Gate /update independently from session-command confirmation.
+
+        Lite intentionally skips confirmation for cheap session resets, but a
+        source pull, dependency install, and gateway restart must keep its own
+        explicit gate.  ``Always Approve`` disables only this update gate.
+        """
+        require_confirmation = True
+        branch = "main"
+        try:
+            cfg = self._read_user_config()
+            updates = cfg.get("updates") if isinstance(cfg, dict) else None
+            if isinstance(updates, dict):
+                require_confirmation = is_truthy_value(
+                    updates.get("require_confirmation"),
+                    default=True,
+                )
+                configured_branch = updates.get("branch")
+                if isinstance(configured_branch, str) and configured_branch.strip():
+                    branch = configured_branch.strip()
+        except Exception:
+            pass
+
+        if not require_confirmation:
+            return await execute()
+
+        async def _on_confirm(choice: str):
+            if choice == "cancel":
+                return "🟡 /update cancelled. Hermes was not changed."
+
+            persist_note = ""
+            if choice == "always":
+                try:
+                    from cli import save_config_value
+
+                    save_config_value("updates.require_confirmation", False)
+                    persist_note = (
+                        "\n\nℹ️ Future /update commands will run without "
+                        "confirmation. Re-enable with "
+                        "`updates.require_confirmation: true` in config.yaml."
+                    )
+                except Exception as exc:
+                    logger.warning(
+                        "Failed to persist updates.require_confirmation=false: %s",
+                        exc,
+                    )
+
+            result = await execute()
+            if persist_note and isinstance(result, str):
+                return result + persist_note
+            return result
+
+        prefix = self._typed_command_prefix_for(event.source.platform)
+        prompt_message = (
+            "⚠️ **Confirm /update**\n\n"
+            f"This will update Hermes from `origin/{branch}`, refresh "
+            "dependencies, and restart the gateway service.\n\n"
+            "Choose:\n"
+            "• **Approve Once** — update this time only\n"
+            "• **Always Approve** — update and silence this prompt permanently\n"
+            "• **Cancel** — leave Hermes unchanged\n\n"
+            f"_Text fallback: reply `{prefix}approve`, `{prefix}always`, "
+            f"or `{prefix}cancel`._"
+        )
+        return await self._request_slash_confirm(
+            event=event,
+            command="update",
+            title="/update",
             message=prompt_message,
             handler=_on_confirm,
         )

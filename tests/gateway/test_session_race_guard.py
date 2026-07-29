@@ -372,7 +372,6 @@ async def test_start_command_is_noop_during_active_session():
     [
         ("/help", "_handle_help_command", "Help text"),
         ("/commands", "_handle_commands_command", "Commands text"),
-        ("/update", "_handle_update_command", "Update text"),
         ("/profile", "_handle_profile_command", "Profile text"),
     ],
 )
@@ -396,6 +395,42 @@ async def test_active_session_bypass_commands_dispatch_without_interrupt(
     assert result == handler_result
     fake_agent.interrupt.assert_not_called()
     assert session_key not in runner.adapters[Platform.TELEGRAM]._pending_messages
+
+
+@pytest.mark.asyncio
+async def test_active_session_update_routes_through_confirmation_without_interrupt():
+    """The active-session bypass must not skip /update confirmation."""
+    runner = _make_runner()
+    event = _make_event(text="/update")
+    session_key = build_session_key(event.source)
+
+    fake_agent = MagicMock()
+    fake_agent.get_activity_summary.return_value = {"seconds_since_activity": 0}
+    runner._running_agents[session_key] = fake_agent
+    runner._handle_update_command = AsyncMock(return_value="Update text")
+    runner._maybe_confirm_update_slash = AsyncMock(return_value="Confirm update")
+
+    result = await runner._handle_message(event)
+
+    assert result == "Confirm update"
+    runner._maybe_confirm_update_slash.assert_awaited_once()
+    runner._handle_update_command.assert_not_awaited()
+    fake_agent.interrupt.assert_not_called()
+    assert session_key not in runner.adapters[Platform.TELEGRAM]._pending_messages
+
+
+@pytest.mark.asyncio
+async def test_idle_update_routes_through_confirmation():
+    runner = _make_runner()
+    event = _make_event(text="/update")
+    runner._handle_update_command = AsyncMock(return_value="Update text")
+    runner._maybe_confirm_update_slash = AsyncMock(return_value="Confirm update")
+
+    result = await runner._handle_message(event)
+
+    assert result == "Confirm update"
+    runner._maybe_confirm_update_slash.assert_awaited_once()
+    runner._handle_update_command.assert_not_awaited()
 
 
 # ------------------------------------------------------------------

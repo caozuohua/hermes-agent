@@ -486,9 +486,42 @@ class TestCmdUpdateProfileSkillSync:
 class TestCmdUpdateBranchFlag:
     """``hermes update --branch <name>`` targets the requested branch.
 
-    The CLI default stays 'main'; --branch lets callers pick a different
-    target without monkey-patching the implementation.
+    ``updates.branch`` selects the default; --branch lets callers override it
+    without monkey-patching the implementation.
     """
+
+    def test_configured_branch_is_used_when_flag_is_omitted(self):
+        from hermes_cli.main import _resolve_update_branch
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"updates": {"branch": "hermes-lite-local"}},
+        ):
+            assert (
+                _resolve_update_branch(SimpleNamespace(branch=None))
+                == "hermes-lite-local"
+            )
+
+    def test_explicit_branch_overrides_configured_branch(self):
+        from hermes_cli.main import _resolve_update_branch
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"updates": {"branch": "hermes-lite-local"}},
+        ):
+            assert (
+                _resolve_update_branch(SimpleNamespace(branch="release"))
+                == "release"
+            )
+
+    def test_malformed_configured_branch_falls_back_to_main(self):
+        from hermes_cli.main import _resolve_update_branch
+
+        with patch(
+            "hermes_cli.config.load_config",
+            return_value={"updates": {"branch": ["not", "a", "branch"]}},
+        ):
+            assert _resolve_update_branch(SimpleNamespace(branch=None)) == "main"
 
     def _branch_side_effect(self, current_branch, target_branch, *, checkout_fails=False, track_fails=False, commit_count="0"):
         """Mock side-effect that knows about checkout/track behavior.

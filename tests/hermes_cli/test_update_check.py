@@ -74,6 +74,76 @@ def test_check_for_updates_invalidates_on_version_change(tmp_path, monkeypatch):
     assert written["ver"] == banner.VERSION
 
 
+def test_check_for_updates_invalidates_on_branch_change(tmp_path, monkeypatch):
+    """A fresh cache for another deployment branch must not be reused."""
+    import hermes_cli.banner as banner
+
+    fake_banner = tmp_path / "hermes_cli" / "banner.py"
+    fake_banner.parent.mkdir(parents=True)
+    fake_banner.touch()
+    (tmp_path / ".git").mkdir()
+    monkeypatch.setattr(banner, "__file__", str(fake_banner))
+    monkeypatch.setattr(banner, "get_hermes_home", lambda: tmp_path)
+    monkeypatch.delenv("HERMES_REVISION", raising=False)
+
+    cache_file = tmp_path / ".update_check"
+    cache_file.write_text(json.dumps({
+        "ts": time.time(),
+        "behind": 99,
+        "rev": None,
+        "ver": banner.VERSION,
+        "branch": "main",
+    }))
+
+    with patch(
+        "hermes_cli.config.load_config",
+        return_value={"updates": {"branch": "hermes-lite-local"}},
+    ), patch(
+        "hermes_cli.banner._check_via_local_git",
+        return_value=0,
+    ) as mock_check:
+        result = banner.check_for_updates()
+
+    assert result == 0
+    mock_check.assert_called_once_with(tmp_path, "hermes-lite-local")
+    assert json.loads(cache_file.read_text())["branch"] == "hermes-lite-local"
+
+
+def test_git_banner_state_uses_configured_branch(tmp_path):
+    """Version labels compare against the deployed branch, not origin/main."""
+    import hermes_cli.banner as banner
+
+    repo_dir = tmp_path / "hermes-agent"
+    repo_dir.mkdir()
+    (repo_dir / ".git").mkdir()
+    refs = []
+
+    def fake_hash(_repo_dir, ref):
+        refs.append(ref)
+        return "stable123" if ref == "origin/hermes-lite-local" else "local456"
+
+    with patch(
+        "hermes_cli.config.load_config",
+        return_value={"updates": {"branch": "hermes-lite-local"}},
+    ), patch(
+        "hermes_cli.banner._git_short_hash",
+        side_effect=fake_hash,
+    ), patch(
+        "hermes_cli.banner.subprocess.run",
+        return_value=MagicMock(returncode=0, stdout="2\n"),
+    ) as mock_run:
+        state = banner.get_git_banner_state(repo_dir)
+
+    assert state == {"upstream": "stable123", "local": "local456", "ahead": 2}
+    assert refs == ["origin/hermes-lite-local", "HEAD"]
+    assert mock_run.call_args.args[0] == [
+        "git",
+        "rev-list",
+        "--count",
+        "origin/hermes-lite-local..HEAD",
+    ]
+
+
 def test_check_for_updates_expired_cache(tmp_path, monkeypatch):
     """When cache is expired, check_for_updates should call git fetch."""
     from hermes_cli.banner import check_for_updates

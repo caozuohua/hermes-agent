@@ -97,10 +97,14 @@ Leaving these unset keeps the legacy defaults (`HERMES_API_TIMEOUT=1800`s, `HERM
 
 ```yaml
 updates:
+  branch: main                  # Default branch for checks and updates
+  require_confirmation: true   # Confirm messaging-gateway /update commands
   pre_update_backup: false       # Create a full HERMES_HOME zip before every update
   backup_keep: 5                 # Keep this many pre-update backup zips
   non_interactive_local_changes: stash  # stash | discard
 ```
+
+`updates.branch` selects the persistent git release channel used by update checks, cached banner/dashboard status, and the actual pull. A command-line `--branch` value overrides it for one invocation. `updates.require_confirmation` controls the independent Once / Always / Cancel gate for `/update` on messaging gateways.
 
 For git installs, Hermes auto-stashes dirty tracked files and untracked files before checking out the update branch or pulling. Interactive terminal updates prompt before restoring that stash. Non-interactive updates (desktop/chat app, gateway, or `--yes`) use `updates.non_interactive_local_changes`: `stash` restores local source edits after a successful pull, while `discard` drops the update-created stash after a successful pull. Use `discard` only on managed installs where local source edits are never meant to persist.
 

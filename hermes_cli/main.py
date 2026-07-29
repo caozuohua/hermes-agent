@@ -7854,14 +7854,32 @@ def _finalize_update_output(state):
 
 
 def _resolve_update_branch(args) -> str:
-    """Normalize ``args.branch`` into a non-empty branch name.
+    """Resolve the update branch from CLI override, config, then ``main``.
 
-    Centralizes the "default to main, accept --branch override, treat empty
-    or whitespace-only values as the default" parsing so every consumer of
-    ``--branch`` (check path, git-update path, ZIP-fallback path) agrees on
-    the same answer.
+    A configured branch lets fork deployments keep the CLI, dashboard, and
+    gateway update surfaces on a tested release branch.  Explicit
+    ``--branch`` always wins.  Malformed config fails closed to the historical
+    ``main`` default.
     """
-    return (getattr(args, "branch", None) or "main").strip() or "main"
+    explicit = getattr(args, "branch", None)
+    if isinstance(explicit, str) and explicit.strip():
+        return explicit.strip()
+
+    try:
+        from hermes_cli.config import load_config
+
+        updates = (load_config() or {}).get("updates", {})
+        configured = (
+            updates.get("branch", "main")
+            if isinstance(updates, dict)
+            else "main"
+        )
+        if isinstance(configured, str) and configured.strip():
+            return configured.strip()
+    except Exception as exc:
+        logger.debug("Could not read updates.branch: %s", exc)
+
+    return "main"
 
 
 def _cmd_update_check(branch: str = "main", *, branch_explicit: bool = False):

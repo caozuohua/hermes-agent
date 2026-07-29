@@ -526,6 +526,20 @@ _SCHEMA_OVERRIDES: Dict[str, Dict[str, Any]] = {
         "description": "Reasoning effort for delegated subagents",
         "options": ["", "low", "medium", "high"],
     },
+    "updates.branch": {
+        "type": "string",
+        "description": (
+            "Default git branch used by update checks and updates. "
+            "The --branch command-line option overrides this value."
+        ),
+    },
+    "updates.require_confirmation": {
+        "type": "boolean",
+        "description": (
+            "Require an independent Once / Always / Cancel confirmation before "
+            "a messaging gateway runs /update."
+        ),
+    },
     "updates.non_interactive_local_changes": {
         "type": "select",
         "description": (
@@ -2322,18 +2336,22 @@ async def update_hermes():
 
 
 def _recent_upstream_commits(n: int = 20) -> List[Dict[str, Any]]:
-    """Commits the local checkout is behind ``origin/main`` by, newest first.
+    """Commits the local checkout is behind its configured update ref by.
 
-    Logs the SAME range the behind-count uses (``HEAD..origin/main`` — see
+    Logs the SAME range the behind-count uses (``HEAD..origin/<branch>`` — see
     ``banner._check_via_local_git``), NOT the branch's ``@{upstream}``. On a
     feature-branch checkout ``@{upstream}`` is the branch's own tip (zero
     commits), which would leave the changelog empty even though the count is
-    non-zero. Pinning to ``origin/main`` keeps count and changelog consistent.
+    non-zero. Pinning to the configured update ref keeps count and changelog
+    consistent.
 
-    Best-effort: returns [] if not a git checkout, origin/main is unreachable,
-    or git is unavailable. Never raises into the request path.
+    Best-effort: returns [] if not a git checkout, the update ref is
+    unreachable, or git is unavailable. Never raises into the request path.
     """
     try:
+        from hermes_cli.banner import _configured_update_branch
+
+        target_ref = f"origin/{_configured_update_branch()}"
         out = subprocess.run(
             [
                 "git",
@@ -2341,7 +2359,7 @@ def _recent_upstream_commits(n: int = 20) -> List[Dict[str, Any]]:
                 str(PROJECT_ROOT),
                 "log",
                 "--format=%H%x1f%s%x1f%an%x1f%ct",
-                "HEAD..origin/main",
+                f"HEAD..{target_ref}",
                 f"-n{int(n)}",
             ],
             capture_output=True,

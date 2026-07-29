@@ -16,7 +16,7 @@ Update to the latest version with a single command:
 hermes update
 ```
 
-This pulls the latest code from `main`, updates dependencies, and prompts you to configure any new options that were added since your last update.
+This pulls the latest code from the configured update branch (`main` by default), updates dependencies, and prompts you to configure any new options that were added since your last update.
 
 ### pip installs
 
@@ -42,22 +42,32 @@ pip install --upgrade hermes-agent    # or: uv pip install --upgrade hermes-agen
 When you run `hermes update`, the following steps occur:
 
 1. **Pairing-data snapshot** — a lightweight pre-update state snapshot is saved (covers `~/.hermes/pairing/`, Feishu comment rules, and other state files that get modified at runtime). Recoverable via the snapshot restore flow described under [Snapshots and rollback](../user-guide/checkpoints-and-rollback.md), or by extracting the most recent quick-snapshot zip Hermes wrote next to your `~/.hermes/` directory.
-2. **Git pull** — pulls the latest code from the `main` branch and updates submodules
+2. **Git pull** — pulls the latest code from `updates.branch` (`main` by default) and updates submodules
 3. **Post-pull syntax validation + auto-rollback** — after the pull, Hermes compiles the eight critical files every `hermes` invocation imports at startup. If any fails to parse (e.g. an orphan merge-conflict marker, an accidentally truncated file), Hermes runs `git reset --hard <pre-pull-sha>` to roll the install back so your shell stays bootable. Re-run `hermes update` once the upstream fix lands.
 4. **Dependency install** — runs `uv pip install -e ".[all]"` to pick up new or changed dependencies
 5. **Config migration** — detects new config options added since your version and prompts you to set them
 6. **Gateway auto-restart** — running gateways are refreshed after the update completes so the new code takes effect immediately. Service-managed gateways (systemd on Linux, launchd on macOS) are restarted through the service manager. Manual gateways are relaunched automatically when Hermes can map the running PID back to a profile.
 
-### Updating against a non-default branch: `--branch`
+### Selecting an update branch
 
-By default `hermes update` tracks `origin/main`. Pass `--branch <name>` to update against a different branch — useful for QA channels, feature branches, or release-candidate testing:
+By default `hermes update` tracks `origin/main`. Set `updates.branch` for a persistent release channel, or pass `--branch <name>` as a one-off override:
 
 ```bash
 hermes update --branch release-candidate
 hermes update --check --branch experimental   # preview behindness only
 ```
 
+```yaml
+# ~/.hermes/config.yaml
+updates:
+  branch: release-candidate
+```
+
+Branch selection always follows `--branch` → `updates.branch` → `main`. Update checks, the banner/dashboard status, cached results, and the actual pull all use the same selected branch.
+
 If your local checkout is on a different branch, Hermes auto-stashes any uncommitted work, switches HEAD to the target branch, and then pulls. Branches that don't exist locally are auto-tracked from `origin/<name>` (`git checkout -B <name> origin/<name>`). Branches that don't exist anywhere fail cleanly — your stashed changes are restored before exit so you're never stranded in a weird state. The `main`-only fork-upstream sync logic is automatically skipped on non-`main` branches.
+
+Messaging gateways require an independent confirmation before `/update` by default. Choosing **Always** disables only this update confirmation through `updates.require_confirmation: false`; it does not change confirmation behavior for session commands such as `/new`.
 
 ### Local changes on non-interactive updates
 
@@ -79,7 +89,7 @@ In the desktop app this is **Settings → Advanced → In-App Update Local Chang
 
 ### Preview-only: `hermes update --check`
 
-Want to know if an update is available before pulling? Run `hermes update --check` — for git installs it fetches and compares commits against `origin/main`; for pip installs it queries PyPI for the latest release. No files are modified, no gateway is restarted. Useful in scripts and cron jobs that gate on "is there an update".
+Want to know if an update is available before pulling? Run `hermes update --check` — for git installs it fetches and compares commits against `origin/<updates.branch>` (or the one-off `--branch` override); for pip installs it queries PyPI for the latest release. No files are modified, no gateway is restarted. Useful in scripts and cron jobs that gate on "is there an update".
 
 ### Full pre-update backup: `--backup`
 

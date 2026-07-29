@@ -851,6 +851,30 @@ class TestUpdateCheckEndpoint:
         assert body["commits"][0]["sha"] == "abc1234"
         assert body["commits"][0]["summary"] == "feat: x"
 
+    def test_changelog_uses_configured_update_branch(self, monkeypatch):
+        import hermes_cli.banner as banner
+        import hermes_cli.web_server as ws
+
+        seen = {}
+
+        class _Result:
+            returncode = 0
+            stdout = ""
+
+        def _run(args, **kwargs):
+            seen["args"] = args
+            return _Result()
+
+        monkeypatch.setattr(
+            banner,
+            "_configured_update_branch",
+            lambda: "hermes-lite-local",
+        )
+        monkeypatch.setattr(ws.subprocess, "run", _run)
+
+        assert ws._recent_upstream_commits() == []
+        assert "HEAD..origin/hermes-lite-local" in seen["args"]
+
     def test_up_to_date_omits_commits(self, monkeypatch):
         import hermes_cli.web_server as ws
         import hermes_cli.banner as banner

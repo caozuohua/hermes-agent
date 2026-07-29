@@ -2423,6 +2423,16 @@ DEFAULT_CONFIG = {
 
     # ``hermes update`` behaviour.
     "updates": {
+        # Git branch used when ``hermes update`` is invoked without an explicit
+        # ``--branch``.  Fork deployments can pin every update surface
+        # (CLI/dashboard/gateway) to a tested release branch instead of
+        # accidentally switching to the repository's main branch.
+        "branch": "main",
+        # Require an explicit gateway confirmation before /update starts.
+        # This gate is intentionally independent from destructive session
+        # command confirmation: Lite may allow /new without a prompt while
+        # still protecting a code pull + dependency install + service restart.
+        "require_confirmation": True,
         # Run a full ``hermes backup``-style zip of HERMES_HOME before every
         # ``hermes update``.  Backups land in ``<HERMES_HOME>/backups/`` and
         # can be restored with ``hermes import <path>``.  Off by default —

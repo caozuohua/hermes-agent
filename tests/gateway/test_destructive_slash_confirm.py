@@ -284,3 +284,126 @@ async def test_resolve_always_persists_opt_out_and_runs_execute(monkeypatch):
     assert resolved is not None
     assert "✨ fresh" in resolved
     assert "config.yaml" in resolved
+
+
+@pytest.mark.asyncio
+async def test_lite_update_keeps_independent_confirmation_gate():
+    """Lite's /new bypass must not bypass the code-update confirmation."""
+    from tools import slash_confirm as _slash_confirm_mod
+
+    runner = _make_runner()
+    runner._read_user_config = lambda: {
+        "gateway": {"lite_commands": True},
+        "approvals": {"destructive_slash_confirm": False},
+        "updates": {
+            "branch": "hermes-lite-local",
+            "require_confirmation": True,
+        },
+    }
+    session_key = build_session_key(_make_source())
+    runner._session_key_for_source = lambda src: session_key
+    _slash_confirm_mod.clear(session_key)
+    execute = AsyncMock(return_value="update started")
+
+    result = await runner._maybe_confirm_update_slash(
+        event=_make_event("/update"),
+        execute=execute,
+    )
+
+    execute.assert_not_awaited()
+    assert "Confirm /update" in result
+    assert "origin/hermes-lite-local" in result
+    pending = _slash_confirm_mod.get_pending(session_key)
+    assert pending is not None
+    assert pending["command"] == "update"
+    _slash_confirm_mod.clear(session_key)
+
+
+def test_update_confirmation_defaults_are_safe():
+    from hermes_cli.config import DEFAULT_CONFIG
+
+    assert DEFAULT_CONFIG["updates"]["branch"] == "main"
+    assert DEFAULT_CONFIG["updates"]["require_confirmation"] is True
+
+
+@pytest.mark.asyncio
+async def test_update_confirmation_gate_off_runs_immediately():
+    runner = _make_runner()
+    runner._read_user_config = lambda: {
+        "updates": {"require_confirmation": False},
+    }
+    execute = AsyncMock(return_value="update started")
+
+    result = await runner._maybe_confirm_update_slash(
+        event=_make_event("/update"),
+        execute=execute,
+    )
+
+    execute.assert_awaited_once()
+    assert result == "update started"
+
+
+@pytest.mark.asyncio
+async def test_update_confirmation_cancel_leaves_hermes_unchanged():
+    from tools import slash_confirm as _slash_confirm_mod
+
+    runner = _make_runner()
+    runner._read_user_config = lambda: {
+        "updates": {"require_confirmation": True},
+    }
+    session_key = build_session_key(_make_source())
+    runner._session_key_for_source = lambda src: session_key
+    _slash_confirm_mod.clear(session_key)
+    execute = AsyncMock(side_effect=AssertionError("update must not start"))
+
+    await runner._maybe_confirm_update_slash(
+        event=_make_event("/update"),
+        execute=execute,
+    )
+    pending = _slash_confirm_mod.get_pending(session_key)
+    resolved = await _slash_confirm_mod.resolve(
+        session_key,
+        pending["confirm_id"],
+        "cancel",
+    )
+
+    execute.assert_not_awaited()
+    assert "not changed" in resolved
+
+
+@pytest.mark.asyncio
+async def test_update_confirmation_always_persists_only_update_gate(monkeypatch):
+    from tools import slash_confirm as _slash_confirm_mod
+
+    runner = _make_runner()
+    runner._read_user_config = lambda: {
+        "updates": {"require_confirmation": True},
+    }
+    session_key = build_session_key(_make_source())
+    runner._session_key_for_source = lambda src: session_key
+    _slash_confirm_mod.clear(session_key)
+    saved = {}
+
+    def _fake_save(path, value):
+        saved[path] = value
+        return True
+
+    import cli as cli_mod
+    monkeypatch.setattr(cli_mod, "save_config_value", _fake_save)
+    execute = AsyncMock(return_value="update started")
+
+    await runner._maybe_confirm_update_slash(
+        event=_make_event("/update"),
+        execute=execute,
+    )
+    pending = _slash_confirm_mod.get_pending(session_key)
+    resolved = await _slash_confirm_mod.resolve(
+        session_key,
+        pending["confirm_id"],
+        "always",
+    )
+
+    execute.assert_awaited_once()
+    assert saved == {"updates.require_confirmation": False}
+    assert "update started" in resolved
+    assert "updates.require_confirmation: true" in resolved

@@ -1236,6 +1236,7 @@ class GatewaySlashCommandsMixin:
                 ("usage", "show token usage for this session"),
                 ("memory", "review memory approval/status"),
                 ("version", "show Hermes version"),
+                ("update", "sync the tested Lite release and restart safely"),
             ]
             lines = ["HermesLite commands"]
             lines.extend(f"`{prefix}{name}` - {desc}" for name, desc in items)

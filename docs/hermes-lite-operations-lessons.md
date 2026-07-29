@@ -9,7 +9,7 @@ debugging a small VPS gateway, not to describe the full Hermes product.
 ## Baseline
 
 - Profile home: `/home/caozuohua99/.hermes-lite`
-- Service: `hermes-lite.service`
+- Service: `hermes-gateway.service`
 - Repo checkout: `/home/caozuohua99/.hermes-lite/hermes-agent`
 - Gateway platform: Lark/Feishu
 - NewAPI endpoint: `http://127.0.0.1:3000/v1`
@@ -28,11 +28,11 @@ The stable target is a small model-facing surface:
 Always start from the live process and final model-facing schema.
 
 ```bash
-systemctl show hermes-lite.service \
+systemctl show hermes-gateway.service \
   -p ActiveState -p SubState -p MainPID -p Restart -p NRestarts \
   -p MemoryCurrent -p MemoryPeak --no-pager
 
-journalctl -u hermes-lite.service -n 160 --no-pager
+journalctl -u hermes-gateway.service -n 160 --no-pager
 ```
 
 For tools, do not count imported modules. Count what the model actually sees:
@@ -209,7 +209,7 @@ RestartSec=10s
 Then verify:
 
 ```bash
-systemctl show hermes-lite.service -p Restart -p ActiveState -p SubState -p MainPID
+systemctl show hermes-gateway.service -p Restart -p ActiveState -p SubState -p MainPID
 ```
 
 Memory limit symptoms must be separated from stop policy symptoms. Check
@@ -291,6 +291,35 @@ For a change discovered on the VPS:
 
 For this branch, upstream `NousResearch/hermes-agent` is read-only for the
 current account. Pushes go to the writable fork remote instead.
+
+## Safe Self-Update Topology
+
+The VPS checkout follows a tested Lite release branch. Keep the Git remotes in
+the convention expected by the built-in updater:
+
+```bash
+origin    git@github.com:caozuohua/hermes-agent.git
+upstream  https://github.com/NousResearch/hermes-agent.git
+```
+
+The profile config pins all update surfaces to the Lite branch and requires
+confirmation for gateway-triggered updates:
+
+```yaml
+updates:
+  branch: hermes-lite-local
+  require_confirmation: true
+  non_interactive_local_changes: stash
+```
+
+`/update` therefore fetches and fast-forwards
+`origin/hermes-lite-local`, refreshes dependencies, restarts
+`hermes-gateway.service`, and reports completion after Feishu reconnects. It
+must never target `upstream/main` directly.
+
+Official Hermes commits continue to be reviewed and ported in small tested
+batches. Automatically merging the full upstream main branch would reintroduce
+the product surfaces removed from Lite and defeats the purpose of this profile.
 
 ## Common Misreads
 

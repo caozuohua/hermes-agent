@@ -105,6 +105,7 @@ async def test_lite_help_is_small_allowlist_and_includes_goal(lite_config):
     assert "/goal" in result
     assert "/status" in result
     assert "/model" in result
+    assert "/update" in result
     assert "/voice" not in result
     assert "/codex-runtime" not in result
     assert "/rollback" not in result
