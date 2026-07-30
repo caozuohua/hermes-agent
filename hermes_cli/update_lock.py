@@ -34,6 +34,7 @@ from __future__ import annotations
 import logging
 import os
 import time
+import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
@@ -54,6 +55,53 @@ MARKER_NAME = ".hermes-update-in-progress"
 # to show "Hermes is still running" instead of a generic failure. Naming it
 # here keeps the concurrent-update refusal on that same understood contract.
 UPDATE_EXIT_CONCURRENT = 2
+
+
+def _publish_claim(path: Path, payload: str) -> bool | None:
+    """Publish a fully-written marker without replacing an existing owner.
+
+    ``Path.write_text()`` is not a lock: two processes can both observe an
+    absent marker and then overwrite each other.  Write the payload to a
+    private sibling first, then claim the public marker name with
+    ``os.link()``.  Creating that final hard link is atomic and fails when
+    another process won the race, while readers can never observe our marker
+    half-written.
+
+    Returns ``True`` when this process won, ``False`` when another marker
+    already exists, and ``None`` when the filesystem cannot provide the
+    operation.  The caller preserves the updater's existing best-effort
+    fallback for that last case.
+    """
+    temp_path = path.with_name(
+        f".{path.name}.{os.getpid()}.{uuid.uuid4().hex}.tmp"
+    )
+    file_descriptor = -1
+    try:
+        file_descriptor = os.open(
+            temp_path,
+            os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+            0o600,
+        )
+        with os.fdopen(file_descriptor, "w", encoding="utf-8") as handle:
+            file_descriptor = -1  # The file object now owns the descriptor.
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        try:
+            os.link(temp_path, path)
+        except FileExistsError:
+            return False
+        return True
+    except OSError as exc:
+        logger.debug("Could not atomically publish update marker %s: %s", path, exc)
+        return None
+    finally:
+        if file_descriptor >= 0:
+            os.close(file_descriptor)
+        try:
+            temp_path.unlink()
+        except OSError:
+            pass
 
 
 def update_marker_path() -> Path:
@@ -169,22 +217,44 @@ class UpdateLock:
 
     def acquire(self) -> bool:
         """Claim the lock. Returns False (and sets ``holder``) if it's taken."""
-        existing = read_live_update(path=self.path)
-        if existing is not None:
-            self.holder = existing
-            return False
         try:
             self.path.parent.mkdir(parents=True, exist_ok=True)
-            self.path.write_text(
-                f"{os.getpid()}\n{int(time.time())}\n", encoding="utf-8"
-            )
         except OSError as exc:
             # Best-effort, exactly like the Rust guard: an unwritable marker
             # must not block the update itself (that would be a worse failure
             # than the race it prevents). Degrade to the pre-lock behavior.
-            logger.debug("Could not write update marker %s: %s", self.path, exc)
+            logger.debug("Could not create update marker directory: %s", exc)
             return True
-        self.acquired = True
+
+        # A stale owner can disappear between inspection and publication.
+        # Retry that narrow race, but never replace a marker that resolves to
+        # a live holder.
+        for _attempt in range(3):
+            existing = read_live_update(path=self.path)
+            if existing is not None:
+                self.holder = existing
+                return False
+
+            published = _publish_claim(
+                self.path,
+                f"{os.getpid()}\n{int(time.time())}\n",
+            )
+            if published is True:
+                self.acquired = True
+                return True
+            if published is None:
+                return True
+
+            # Another process atomically published after our read. Resolve
+            # that marker on the next pass; if it was stale, read_live_update
+            # removes it and lets us retry.
+
+        existing = read_live_update(path=self.path)
+        if existing is not None:
+            self.holder = existing
+            return False
+        # Repeated churn or an unusable filesystem: keep updates possible,
+        # matching the pre-lock best-effort contract.
         return True
 
     def release(self) -> None:

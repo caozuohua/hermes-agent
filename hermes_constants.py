@@ -50,6 +50,14 @@ def _get_platform_default_hermes_home() -> Path:
     return Path.home() / ".hermes"
 
 
+def _hermes_home_from_env() -> Path:
+    """Resolve the process launch home, ignoring context-local overrides."""
+    val = os.environ.get("HERMES_HOME", "").strip()
+    if val:
+        return Path(val)
+    return _get_platform_default_hermes_home()
+
+
 def get_hermes_home() -> Path:
     """Return the Hermes home directory (default: platform-native path).
 
@@ -72,7 +80,7 @@ def get_hermes_home() -> Path:
 
     val = os.environ.get("HERMES_HOME", "").strip()
     if val:
-        return Path(val)
+        return _hermes_home_from_env()
 
     # Guard: if a non-default profile is sticky-active, warn once that
     # the fallback to the default profile is almost certainly wrong.
@@ -105,7 +113,17 @@ def get_hermes_home() -> Path:
             except Exception:
                 pass
 
-    return _get_platform_default_hermes_home()
+    return _hermes_home_from_env()
+
+
+def get_process_hermes_home() -> Path:
+    """Return the process Hermes home, ignoring per-task profile overrides.
+
+    Update coordination is install-scoped: a request-local profile override
+    must not move its lock away from the checkout shared by the terminal and
+    gateway processes.
+    """
+    return _hermes_home_from_env()
 
 
 def get_default_hermes_root() -> Path:

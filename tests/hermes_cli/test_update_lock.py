@@ -16,7 +16,9 @@ disk.
 
 from __future__ import annotations
 
+import multiprocessing
 import os
+import queue
 import time
 
 import pytest
@@ -35,6 +37,17 @@ from hermes_cli.update_lock import (
 DEAD_PID = 4294967294
 
 
+def _contend_for_update_lock(marker_path, start_event, release_event, results):
+    """Child-process target for the real mutual-exclusion regression test."""
+    start_event.wait(10)
+    lock = UpdateLock(path=marker_path)
+    acquired = lock.acquire()
+    results.put(acquired)
+    if acquired:
+        release_event.wait(10)
+        lock.release()
+
+
 @pytest.fixture
 def marker(tmp_path):
     return tmp_path / ".hermes-update-in-progress"
@@ -47,7 +60,17 @@ def test_marker_path_follows_process_hermes_home(tmp_path, monkeypatch):
     put the lock somewhere the other two owners never read.
     """
     monkeypatch.setenv("HERMES_HOME", str(tmp_path))
-    assert update_marker_path() == tmp_path / ".hermes-update-in-progress"
+    from hermes_constants import (
+        reset_hermes_home_override,
+        set_hermes_home_override,
+    )
+
+    override = tmp_path / "request-profile"
+    token = set_hermes_home_override(override)
+    try:
+        assert update_marker_path() == tmp_path / ".hermes-update-in-progress"
+    finally:
+        reset_hermes_home_override(token)
 
 
 def test_acquire_writes_pid_and_start_time(marker):
@@ -72,6 +95,41 @@ def test_second_acquire_is_refused_while_the_first_is_live(marker):
     assert second.holder is not None
     assert second.holder.pid == os.getpid()
     assert second.acquired is False
+
+
+def test_simultaneous_processes_have_exactly_one_winner(marker):
+    """The marker must be a lock, not a check-then-overwrite convention."""
+    context = multiprocessing.get_context("spawn")
+    start_event = context.Event()
+    release_event = context.Event()
+    results = context.Queue()
+    processes = [
+        context.Process(
+            target=_contend_for_update_lock,
+            args=(marker, start_event, release_event, results),
+        )
+        for _ in range(2)
+    ]
+
+    for process in processes:
+        process.start()
+    start_event.set()
+
+    try:
+        outcomes = [results.get(timeout=15) for _ in processes]
+        assert sorted(outcomes) == [False, True]
+    finally:
+        release_event.set()
+        for process in processes:
+            process.join(timeout=15)
+            if process.is_alive():
+                process.terminate()
+                process.join(timeout=5)
+        try:
+            results.close()
+            results.join_thread()
+        except (AttributeError, queue.Empty):
+            pass
 
 
 def test_refused_lock_does_not_delete_the_live_owners_marker(marker):
