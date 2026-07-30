@@ -161,11 +161,52 @@ Notes:
   quick-check `ok`; one Lark keepalive timeout was logged and the connection
   subsequently re-established without a service restart.
 
+## Review Checkpoint - 2026-07-29
+
+Last reviewed upstream main: `5c07ba2f3` (2026-07-29).
+
+Next review should scan only `5c07ba2f3..origin/main`, plus the deferred
+watchlist below.
+
+### Batch 7 - Safe Updates, Approval Coverage, And Gateway Teardown
+
+- [x] `da26ff986` fix(approval): detect recursive rm when flags follow operands
+- [x] `5cc5c58e0` fix(gateway): flush pending memory writes before session teardown
+- [x] `41233e19c` fix(gateway): forward failure_reason through the empty-response return path
+- [x] `fe8e4d93d` fix(update): make the in-progress marker a cross-process lock
+- [x] `37519b4ee` fix(update): use the no-kill pid probe, not os.kill(pid, 0)
+- [x] `80d8e41ae` fix(update): publish the cross-process lock atomically (Lite follow-up)
+
+Notes:
+- The upstream update marker used a check-then-`write_text()` sequence, so two
+  simultaneous processes could still both enter the updater. The Lite
+  follow-up writes a complete private payload and atomically publishes it with
+  an exclusive hard link. A real two-process regression test proves exactly
+  one winner.
+- The process-scoped `get_process_hermes_home()` prerequisite was extracted
+  from `bf517f930` without importing its unrelated dashboard/theme changes.
+- `41233e19c` was adapted to the older Lite gateway fixture while preserving
+  the runtime behavior and upstream authorship.
+- Local focused verification on 2026-07-29:
+  - update lock, including real two-process contention: 17 passed;
+  - approval detection: 252 passed;
+  - gateway memory flush before teardown: 2 passed;
+  - compression/failure metadata session sync: 4 passed.
+  - update branch/cache, gateway update streaming, Feishu cards,
+    confirmation, and shutdown regressions: 167 passed. Two pre-existing
+    Windows test-fixture assumptions were refreshed before the clean rerun.
+
 Deferred:
 - `origin/fix/feishu-ws-close-frame` (`1a296b96d`, `91e080583`) remains outside
   upstream main. The observed keepalive timeout does not establish that its
   outbound CLOSE-frame cleanup is the remedy, so keep watching rather than
   importing an unmerged patch.
+- `4b039e954` + `bd7938fa0` reconnect-watcher supervision depend on the full
+  `_spawn_supervised` task framework that Lite does not currently carry.
+  Re-evaluate only with a Lite reproduction or when that framework is ported.
+- `58f6678e6`, `40837e2dd`, `23e44a284`, and `72024950c` add a broader shutdown
+  recovery-file subsystem. The direct pending-memory drain was ported; keep the
+  larger recovery stack deferred until its state-DB prerequisites are audited.
 
 Skipped for Lite:
 - Desktop, TUI, MCP, Computer Use, STT/TTS, image/vision, WhatsApp, Discord,
