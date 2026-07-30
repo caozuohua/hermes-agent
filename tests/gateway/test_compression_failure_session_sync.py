@@ -123,9 +123,11 @@ def _runner(session_store):
     return runner
 
 
-def _install_compression_failure_agent(monkeypatch):
+def _install_compression_failure_agent(
+    monkeypatch, agent_cls=_CompressionThenFailureAgent
+):
     fake_run_agent = types.ModuleType("run_agent")
-    fake_run_agent.AIAgent = _CompressionThenFailureAgent
+    fake_run_agent.AIAgent = agent_cls
     monkeypatch.setitem(sys.modules, "run_agent", fake_run_agent)
     monkeypatch.setenv("HERMES_TOOL_PROGRESS_MODE", "off")
     monkeypatch.setenv("HERMES_AGENT_TIMEOUT", "0")
