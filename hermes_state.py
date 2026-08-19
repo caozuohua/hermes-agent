@@ -1598,6 +1598,37 @@ class SessionDB:
             )
         self._execute_write(_do)
 
+    def promote_to_session_reset(
+        self, session_id: str, reason: str = "session_reset"
+    ) -> bool:
+        """Durably record an intentional reset without overwriting real boundaries.
+
+        Gateway recovery deliberately treats ``agent_close`` rows as resumable.
+        A reset racing with agent cleanup therefore has to *promote* that
+        accidental close reason, not call :meth:`end_session`, whose
+        first-writer-wins contract would leave the row recoverable.
+
+        Live rows and ``agent_close`` rows may be promoted.  Explicit boundaries
+        such as compression, a manual session switch, or an earlier reset are
+        preserved.  Returns whether a row was changed.
+        """
+        if not session_id:
+            return False
+        now = time.time()
+
+        def _do(conn):
+            cursor = conn.execute(
+                "UPDATE sessions SET ended_at = ?, end_reason = ? "
+                "WHERE id = ? AND (ended_at IS NULL OR end_reason = 'agent_close')",
+                (now, reason, session_id),
+            )
+            return cursor.rowcount
+
+        try:
+            return bool(self._execute_write(_do))
+        except Exception:
+            return False
+
     def update_session_cwd(self, session_id: str, cwd: str) -> None:
         """Persist the session working directory when a frontend knows it."""
         if not session_id or not cwd:

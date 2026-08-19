@@ -194,3 +194,28 @@ class TestRecoverOutsideLock:
             f"_recover_session_from_db called "
             f"{len(recover_calls_under_lock)} time(s) while lock was held"
         )
+
+    def test_auto_reset_does_not_recover_session_being_ended(self, tmp_path):
+        """An expired live row must become a fresh session, never reopen itself."""
+        source = _source()
+        db = _db_with_rows({"sid_expired": {"end_reason": None, "id": "sid_expired"}})
+        db.find_latest_gateway_session_for_peer.return_value = {
+            "id": "sid_expired",
+            "started_at": datetime.now().timestamp(),
+        }
+        store = _make_store(tmp_path, db)
+        store.config.default_reset_policy = SessionResetPolicy(
+            mode="idle", idle_minutes=1
+        )
+        key = store._generate_session_key(source)
+        expired = _seed_entry(store, key, "sid_expired")
+        expired.last_prompt_tokens = 42
+
+        result = store.get_or_create_session(source)
+
+        assert result.session_id != "sid_expired"
+        assert result.was_auto_reset is True
+        assert result.auto_reset_reason == "idle"
+        db.find_latest_gateway_session_for_peer.assert_not_called()
+        db.reopen_session.assert_not_called()
+        db.promote_to_session_reset.assert_called_once_with("sid_expired", "idle")

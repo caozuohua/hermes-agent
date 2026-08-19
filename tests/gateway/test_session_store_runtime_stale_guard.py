@@ -198,3 +198,31 @@ class TestRuntimeStaleGuard:
 
         assert result.session_id != "sid_old"
         db.get_session.assert_not_called()
+
+    def test_expired_stale_agent_close_is_reset_not_recovered(self, tmp_path):
+        """Expiry wins when cleanup has already marked the row agent_close."""
+        source = _source()
+        db = _db_returning({
+            "sid_expired": {"end_reason": "agent_close", "id": "sid_expired"}
+        })
+        db.find_latest_gateway_session_for_peer.return_value = {
+            "id": "sid_expired",
+            "started_at": (datetime.now() - timedelta(hours=2)).timestamp(),
+        }
+        store = _make_store_with_db(tmp_path, db)
+        store.config.default_reset_policy = SessionResetPolicy(
+            mode="idle", idle_minutes=1
+        )
+        key = store._generate_session_key(source)
+        store._entries[key] = _make_entry(
+            key, "sid_expired", last_prompt_tokens=99
+        )
+
+        result = store.get_or_create_session(source)
+
+        assert result.session_id != "sid_expired"
+        assert result.was_auto_reset is True
+        assert result.auto_reset_reason == "idle"
+        db.find_latest_gateway_session_for_peer.assert_not_called()
+        db.reopen_session.assert_not_called()
+        db.promote_to_session_reset.assert_called_once_with("sid_expired", "idle")

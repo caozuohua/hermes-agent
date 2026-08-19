@@ -1059,6 +1059,33 @@ class SessionStore:
             )
         except Exception as exc:
             logger.debug("Gateway session peer record failed for %s: %s", session_key, exc)
+
+    def set_expiry_finalized(self, entry: SessionEntry) -> None:
+        """Persist expiry finalization and its durable reset boundary.
+
+        The JSON flag prevents the expiry watcher from running twice.  The
+        SQLite promotion prevents stale-route recovery from later reopening an
+        expired row that agent cleanup happened to close as ``agent_close``.
+        Disk and database I/O stay outside ``self._lock``.
+        """
+        with self._lock:
+            entry.expiry_finalized = True
+            entries_snapshot = dict(self._entries)
+        self._save_entries(entries_snapshot)
+
+        if self._db:
+            promote = getattr(self._db, "promote_to_session_reset", None)
+            try:
+                if callable(promote):
+                    promote(entry.session_id)
+                else:
+                    self._db.end_session(entry.session_id, "session_reset")
+            except Exception as exc:
+                logger.debug(
+                    "Session DB promote_to_session_reset failed for %s: %s",
+                    entry.session_id,
+                    exc,
+                )
     
     def _is_session_expired(self, entry: SessionEntry) -> bool:
         """Check if a session has expired based on its reset policy.
@@ -1299,6 +1326,17 @@ class SessionStore:
                         session_key, entry.session_id,
                     )
                     self._entries.pop(session_key, None)
+                    # An expired session is an intentional reset boundary even
+                    # if cleanup already ended it as ``agent_close``.  Do not
+                    # let recovery reopen the transcript we just decided to
+                    # reset (#61220).
+                    if _reset_reason:
+                        was_auto_reset = True
+                        auto_reset_reason = _reset_reason
+                        reset_had_activity = (
+                            entry.total_tokens > 0 or entry.last_prompt_tokens > 0
+                        )
+                        db_end_session_id = entry.session_id
                     entry = None
                     _needs_recover = True
                 elif entry.session_id != _stale_session_id:
@@ -1311,7 +1349,9 @@ class SessionStore:
                     if _reset_reason:
                         was_auto_reset = True
                         auto_reset_reason = _reset_reason
-                        reset_had_activity = entry.last_prompt_tokens > 0
+                        reset_had_activity = (
+                            entry.total_tokens > 0 or entry.last_prompt_tokens > 0
+                        )
                         db_end_session_id = entry.session_id
                         self._entries.pop(session_key, None)
                         entry = None
@@ -1326,7 +1366,7 @@ class SessionStore:
             _entries_snapshot = dict(self._entries)
 
         # ---- Phase 3: no-lock I/O -- recovery + create + save + DB ops ----
-        if _needs_recover:
+        if _needs_recover and db_end_session_id is None:
             recovered = self._query_recoverable_session(
                 session_key=session_key, source=source, now=now,
             )
@@ -1373,8 +1413,13 @@ class SessionStore:
 
         # SQLite operations outside the lock (unchanged).
         if self._db and db_end_session_id:
+            db_end_reason = auto_reset_reason or "session_reset"
             try:
-                self._db.end_session(db_end_session_id, "session_reset")
+                promote = getattr(self._db, "promote_to_session_reset", None)
+                if callable(promote):
+                    promote(db_end_session_id, db_end_reason)
+                else:
+                    self._db.end_session(db_end_session_id, db_end_reason)
             except Exception as e:
                 logger.debug("Session DB operation failed: %s", e)
 
