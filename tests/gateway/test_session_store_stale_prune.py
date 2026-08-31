@@ -137,7 +137,7 @@ class TestPruneStaleSessionsLocked:
         db.find_latest_gateway_session_for_peer.assert_called_once()
         db.reopen_session.assert_called_once_with("sid_child")
 
-    def test_prunes_stale_entry_when_recovery_only_finds_same_ended_session(self, tmp_path):
+    def test_preserves_original_entry_when_recovery_reopens_same_session(self, tmp_path):
         key = "agent:main:telegram:dm:5140768830"
         db = _db_returning({"sid_parent": {"end_reason": "agent_close", "id": "sid_parent"}})
         db.find_latest_gateway_session_for_peer.return_value = {
@@ -145,11 +145,22 @@ class TestPruneStaleSessionsLocked:
             "started_at": 1782744974.0,
         }
         store = _make_store_with_db(tmp_path, db)
-        store._entries[key] = _make_entry_with_origin(key, "sid_parent")
+        original = _make_entry_with_origin(key, "sid_parent")
+        original.resume_pending = True
+        original.resume_reason = "restart_timeout"
+        original.total_tokens = 12345
+        store._entries[key] = original
 
-        store._prune_stale_sessions_locked()
+        with patch.object(store, "_save") as mock_save:
+            store._prune_stale_sessions_locked()
 
-        assert key not in store._entries
+        assert store._entries[key] is original
+        assert original.resume_pending is True
+        assert original.resume_reason == "restart_timeout"
+        assert original.total_tokens == 12345
+        db.find_latest_gateway_session_for_peer.assert_called_once()
+        db.reopen_session.assert_called_once_with("sid_parent")
+        mock_save.assert_not_called()
 
     def test_noop_when_db_is_none(self, tmp_path):
         config = GatewayConfig(default_reset_policy=SessionResetPolicy(mode="none"))

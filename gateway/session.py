@@ -861,6 +861,20 @@ class SessionStore:
                         recovered_keys += 1
                         continue
 
+                    # Recovery may reopen the same durable session ID.  Keep the
+                    # existing in-memory entry in that case: it carries live
+                    # gateway-only state (for example resume_pending) that the
+                    # row-derived recovery object cannot reconstruct.
+                    if recovered_entry is not None:
+                        logger.warning(
+                            "gateway.session: reopened stale sessions.json entry "
+                            "%r -> %s (end_reason=%r); preserving live routing state",
+                            key,
+                            entry.session_id,
+                            row["end_reason"],
+                        )
+                        continue
+
                     logger.warning(
                         "gateway.session: pruning stale sessions.json entry "
                         "%r -> %s (end_reason=%r); left by a crashed gateway",
