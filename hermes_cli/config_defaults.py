@@ -2084,6 +2084,9 @@ DEFAULT_CONFIG = {
     },
 
     "updates": {
+        # Default branch for CLI, dashboard, desktop, and gateway updates.
+        # An explicit command-line branch always wins.
+        "branch": "main",
         # Passive version/banner checks only; explicit `hermes update --check` remains enabled.
         "check": True,
         # Pre-update backup. quick = snapshot small critical state (pairing JSONs, cron jobs,
