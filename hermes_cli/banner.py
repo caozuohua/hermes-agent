@@ -263,8 +263,23 @@ def _check_via_rev(local_rev: str) -> Optional[int]:
     return _tips_behind(local_rev, _upstream_main_sha())
 
 
-def _check_via_local_git(repo_dir: Path) -> Optional[int]:
-    """Count commits behind origin/main in a local checkout."""
+def _configured_update_branch() -> str:
+    """Return the configured deployment branch, preserving main fallback."""
+    try:
+        from hermes_cli.config import load_config
+
+        updates = (load_config() or {}).get("updates", {})
+        branch = updates.get("branch", "main") if isinstance(updates, dict) else "main"
+        if isinstance(branch, str) and branch.strip():
+            return branch.strip()
+    except Exception:
+        pass
+    return "main"
+
+
+def _check_via_local_git(repo_dir: Path, branch: str = "main") -> Optional[int]:
+    """Count commits behind the selected origin branch."""
+    target_ref = f"origin/{branch}"
     # Probe the origin URL under the same config-isolated env as the fetch below. A plain
     # get-url applies a global url.<https>.insteadOf rewrite, so an SSH origin masquerades as
     # HTTPS, the SSH-avoiding fast path is skipped — and the fetch, whose env drops global
@@ -301,7 +316,7 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         # transfers ~1,400 remote heads (3.0 s vs 0.55 s measured) and can burn the full timeout.
         # A scoped fetch still updates ``origin/main`` and FETCH_HEAD; ``--depth 1`` preserves
         # the shallow boundary.
-        fetch_args = ["fetch", "origin", "main", *(["--depth", "1"] if is_shallow else []), "--quiet"]
+        fetch_args = ["fetch", "origin", branch, *(["--depth", "1"] if is_shallow else []), "--quiet"]
         return _git_ok(fetch_args, cwd=repo_dir, timeout=10, network=True)
 
     fetch_ok = _quiet(_fetch, False)  # Offline or timeout — don't use stale refs
@@ -317,9 +332,9 @@ def _check_via_local_git(repo_dir: Path) -> Optional[int]:
         head_rev = _git_stdout(["rev-parse", "HEAD"], cwd=repo_dir)
         target_rev = (
             _git_stdout(["rev-parse", "FETCH_HEAD"], cwd=repo_dir)
-            or _git_stdout(["rev-parse", "origin/main"], cwd=repo_dir))
+            or _git_stdout(["rev-parse", target_ref], cwd=repo_dir))
         return _tips_behind(head_rev, target_rev)
-    behind = _git_count(["rev-list", "--count", "HEAD..origin/main"], cwd=repo_dir)
+    behind = _git_count(["rev-list", "--count", f"HEAD..{target_ref}"], cwd=repo_dir)
     return behind if fetch_ok or (behind is not None and behind > 0) else None
 
 
@@ -344,6 +359,7 @@ def check_for_updates(*, passive: bool = False) -> Optional[int]:
 
     cache_file = get_hermes_home() / ".update_check"
     embedded_rev = os.environ.get("HERMES_REVISION") or None
+    update_branch = _configured_update_branch()
     # Docker images have no working tree (the image excludes `.git`) and set no HERMES_REVISION.
     # None makes both the Rich banner and the Ink badge show nothing, mirroring the dashboard's
     # `/api/hermes/update/check` short-circuit so the surfaces agree.
@@ -357,19 +373,21 @@ def check_for_updates(*, passive: bool = False) -> Optional[int]:
     now = time.time()
     cached = _read_json(cache_file)
     if (cached is not None and now - cached.get("ts", 0) < _UPDATE_CHECK_CACHE_SECONDS
-            and cached.get("rev") == embedded_rev and cached.get("ver") == VERSION):
+            and cached.get("rev") == embedded_rev and cached.get("ver") == VERSION
+            and cached.get("branch", "main") == update_branch):
         return cached.get("behind")
     if embedded_rev:
         behind = _check_via_rev(embedded_rev)
     else:
         # No checkout and no embedded revision — status can't be determined.
         repo_dir = _resolve_repo_dir()
-        behind = _check_via_local_git(repo_dir) if repo_dir is not None else None
+        behind = _check_via_local_git(repo_dir, update_branch) if repo_dir is not None else None
     # Don't cache inconclusive results: None means the check could not run (typically a failed
     # fetch), and caching it would suppress retries for the full 6-hour window (#82166).
     if behind is not None:
         _quiet(lambda: cache_file.write_text(
-            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION}), encoding="utf-8"))
+            json.dumps({"ts": now, "behind": behind, "rev": embedded_rev, "ver": VERSION,
+                        "branch": update_branch}), encoding="utf-8"))
     return behind
 
 
@@ -409,11 +427,15 @@ def _compute_git_banner_state(repo_dir: Optional[Path] = None) -> Optional[dict]
     repo_dir = repo_dir or _resolve_repo_dir()
     if repo_dir is None:
         return _baked_banner_state()
-    upstream, local = (_git_stdout(["rev-parse", "--short=8", rev], cwd=repo_dir) for rev in ("origin/main", "HEAD"))
+    update_branch = _configured_update_branch()
+    target_ref = f"origin/{update_branch}"
+    upstream, local = (
+        _git_stdout(["rev-parse", "--short=8", rev], cwd=repo_dir)
+        for rev in (target_ref, "HEAD")
+    )
     if not upstream or not local:
-        # Live-git lookup failed (e.g. shallow clone without origin/main).
         return _baked_banner_state()
-    ahead = _git_count(["rev-list", "--count", "origin/main..HEAD"], cwd=repo_dir) or 0
+    ahead = _git_count(["rev-list", "--count", f"{target_ref}..HEAD"], cwd=repo_dir) or 0
     return {"upstream": upstream, "local": local, "ahead": max(ahead, 0)}
 
 
