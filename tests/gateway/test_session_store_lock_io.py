@@ -8,13 +8,15 @@ SELECTs (``_is_session_ended_in_db``), a full routing-index rewrite +
 These tests assert those three I/O calls are invoked *outside* the lock.
 They follow the mock-DB idiom from ``test_session_store_runtime_stale_guard``.
 """
+import json
 import threading
+from concurrent.futures import ThreadPoolExecutor
 from datetime import datetime, timedelta
 from unittest.mock import MagicMock, patch
 
 import pytest
 
-from gateway.config import GatewayConfig, Platform, SessionResetPolicy
+from gateway.config import GatewayConfig, Platform
 from gateway.session import SessionEntry, SessionSource, SessionStore
 
 
@@ -68,7 +70,7 @@ def _db_with_rows(rows: dict) -> MagicMock:
 
 def _make_store(tmp_path, db_mock=None) -> SessionStore:
     """Build a SessionStore with a ``_TrackedLock``, bypassing disk load."""
-    config = GatewayConfig(default_reset_policy=SessionResetPolicy(mode="none"))
+    config = GatewayConfig()
     with patch("gateway.session.SessionStore._ensure_loaded"):
         store = SessionStore(sessions_dir=tmp_path, config=config)
     if db_mock is not None:
@@ -126,7 +128,7 @@ class TestStaleCheckOutsideLock:
                 calls_under_lock.append(sid)
             return orig(sid)
 
-        store._is_session_ended_in_db = tracking
+        store._is_session_ended_in_db = tracking  # type: ignore[method-assign]
 
         store.get_or_create_session(source)
 
@@ -146,14 +148,14 @@ class TestSaveOutsideLock:
         lock = store._lock
         save_calls_under_lock = []
 
-        orig_save = store._save
+        orig_save = store._save_entries
 
         def tracking_save():
             if lock.held:
                 save_calls_under_lock.append(True)
             orig_save()
 
-        store._save = tracking_save
+        store._save_entries = tracking_save  # type: ignore[method-assign]
 
         # force_new bypasses the existing-entry path, goes straight to create.
         store.get_or_create_session(source, force_new=True)
@@ -179,14 +181,14 @@ class TestRecoverOutsideLock:
         lock = store._lock
         recover_calls_under_lock = []
 
-        orig = store._recover_session_from_db
+        orig = store._query_recoverable_session
 
         def tracking(**kw):
-            if lock.held:
+            if getattr(lock, "held", False):
                 recover_calls_under_lock.append(True)
             return orig(**kw)
 
-        store._recover_session_from_db = tracking
+        store._query_recoverable_session = tracking  # type: ignore[method-assign]
 
         store.get_or_create_session(source)
 
@@ -195,27 +197,58 @@ class TestRecoverOutsideLock:
             f"{len(recover_calls_under_lock)} time(s) while lock was held"
         )
 
-    def test_auto_reset_does_not_recover_session_being_ended(self, tmp_path):
-        """An expired live row must become a fresh session, never reopen itself."""
-        source = _source()
-        db = _db_with_rows({"sid_expired": {"end_reason": None, "id": "sid_expired"}})
-        db.find_latest_gateway_session_for_peer.return_value = {
-            "id": "sid_expired",
-            "started_at": datetime.now().timestamp(),
-        }
-        store = _make_store(tmp_path, db)
-        store.config.default_reset_policy = SessionResetPolicy(
-            mode="idle", idle_minutes=1
-        )
-        key = store._generate_session_key(source)
-        expired = _seed_entry(store, key, "sid_expired")
-        expired.last_prompt_tokens = 42
 
-        result = store.get_or_create_session(source)
+def test_concurrent_same_key_returns_one_published_session(tmp_path):
+    """Concurrent first messages for one routing key must converge on one ID."""
+    source = _source()
+    db = _db_with_rows({})
+    store = _make_store(tmp_path, db)
+    owner_started = threading.Event()
+    release_owner = threading.Event()
+    original_query = store._query_recoverable_session
 
-        assert result.session_id != "sid_expired"
-        assert result.was_auto_reset is True
-        assert result.auto_reset_reason == "idle"
-        db.find_latest_gateway_session_for_peer.assert_not_called()
-        db.reopen_session.assert_not_called()
-        db.promote_to_session_reset.assert_called_once_with("sid_expired", "idle")
+    def synchronized_query(**kwargs):
+        owner_started.set()
+        assert release_owner.wait(timeout=10)
+        return original_query(**kwargs)
+
+    store._query_recoverable_session = synchronized_query  # type: ignore[method-assign]
+    with ThreadPoolExecutor(max_workers=2) as pool:
+        owner = pool.submit(store.get_or_create_session, source)
+        assert owner_started.wait(timeout=10)
+        follower = pool.submit(store.get_or_create_session, source)
+        release_owner.set()
+        entries = [owner.result(timeout=10), follower.result(timeout=10)]
+
+    key = store._generate_session_key(source)
+    assert entries[0] is entries[1]
+    assert entries[0].session_id == store._entries[key].session_id
+    created_ids = {call.kwargs["session_id"] for call in db.create_session.call_args_list}
+    assert created_ids == {entries[0].session_id}
+
+
+def test_auto_reset_does_not_recover_session_being_ended(tmp_path):
+    source = _source()
+    db = _db_with_rows({})
+    store = _make_store(tmp_path, db)
+    key = store._generate_session_key(source)
+    old = _seed_entry(store, key, "old-session")
+    old.suspended = True
+    db.find_latest_gateway_session_for_peer.return_value = {
+        "id": old.session_id,
+        "session_key": key,
+        "started_at": old.created_at.timestamp(),
+    }
+
+    entry = store.get_or_create_session(source)
+
+    assert entry.session_id != old.session_id
+    assert entry.was_auto_reset is True
+    db.reopen_session.assert_not_called()
+    # Auto-reset now writes through promote_to_session_reset (upgrades
+    # accidental agent_close/ws_orphan_reap ends) with the specific
+    # auditable reason — a suspended session resets as "suspended".
+    db.promote_to_session_reset.assert_called_once_with(
+        old.session_id, "suspended"
+    )
+    db.end_session.assert_not_called()

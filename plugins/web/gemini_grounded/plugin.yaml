@@ -1,7 +1,0 @@
-name: web-gemini-grounded
-version: 1.0.0
-description: "Gemini Grounding with Google Search via the Gemini Interactions API. Requires GEMINI_API_KEY or GOOGLE_API_KEY."
-author: NousResearch
-kind: backend
-provides_web_providers:
-  - gemini-grounded
