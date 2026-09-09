@@ -277,8 +277,9 @@ def _configured_update_branch() -> str:
     return "main"
 
 
-def _check_via_local_git(repo_dir: Path, branch: str = "main") -> Optional[int]:
+def _check_via_local_git(repo_dir: Path, branch: Optional[str] = None) -> Optional[int]:
     """Count commits behind the selected origin branch."""
+    branch = branch or _configured_update_branch()
     target_ref = f"origin/{branch}"
     # Probe the origin URL under the same config-isolated env as the fetch below. A plain
     # get-url applies a global url.<https>.insteadOf rewrite, so an SSH origin masquerades as
@@ -381,7 +382,7 @@ def check_for_updates(*, passive: bool = False) -> Optional[int]:
     else:
         # No checkout and no embedded revision — status can't be determined.
         repo_dir = _resolve_repo_dir()
-        behind = _check_via_local_git(repo_dir, update_branch) if repo_dir is not None else None
+        behind = _check_via_local_git(repo_dir) if repo_dir is not None else None
     # Don't cache inconclusive results: None means the check could not run (typically a failed
     # fetch), and caching it would suppress retries for the full 6-hour window (#82166).
     if behind is not None:
