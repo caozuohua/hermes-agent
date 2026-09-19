@@ -271,6 +271,10 @@ def _should_redact_assignment(key: str, value: str, *, check_keyword: bool) -> b
 # JSON field patterns: "apiKey": "value", "token": "value", etc.
 _JSON_KEY_NAMES = r"(?:api_?[Kk]ey|token|secret|password|access_token|refresh_token|auth_token|bearer|secret_value|raw_secret|secret_input|key_material)"
 _JSON_FIELD_RE = re.compile(rf'("{_JSON_KEY_NAMES}")\s*:\s*"([^"]+)"', re.IGNORECASE)
+# The same field inside a JSON-encoded string (``{"output": "{\\"api_key\\": \\"…\\"}"}``): every tool result
+# that wraps a config dump in JSON escapes the quotes, so the rule above never saw the value (#115104).
+# The backreference keeps the key's and value's escape depth equal.
+_JSON_FIELD_ESCAPED_RE = re.compile(rf'((\\+)"{_JSON_KEY_NAMES}\2")\s*:\s*\2"([^"\\]+)\2"', re.IGNORECASE)
 
 # Authorization / Proxy-Authorization, any scheme or bare credential; header
 # name and scheme word preserved. The credential class excludes quotes: pulling
@@ -528,6 +532,9 @@ def _redact_assignments(text: str) -> str:
     if ":" in text and '"' in text:
         text = _JSON_FIELD_RE.sub(
             _assignment_sub(lambda g: f'{g[0]}: "{_mask_token(g[1])}"', check_keyword=False), text)
+        if '\\"' in text:
+            text = _JSON_FIELD_ESCAPED_RE.sub(
+                _assignment_sub(lambda g: f'{g[0]}: {g[1]}"{_mask_token(g[2])}{g[1]}"', check_keyword=False), text)
 
     # YAML after JSON: quoted values are handled there (_YAML_ASSIGN_RE skips quotes).
     if ":" in text and "://" not in text:

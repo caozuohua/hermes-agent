@@ -16,6 +16,7 @@ from concurrent.futures import Future, ThreadPoolExecutor, wait
 from functools import partial
 from typing import Any, Callable, Dict, List, Optional
 
+from agent.redact import redact_for_egress
 from agent.memory_provider import MemoryProvider, PRE_COMPRESS_CHECKPOINT_API_VERSION
 from agent.skill_commands import extract_user_instruction_from_skill_message
 from tools.hook_output_spill import get_spill_config, spill_if_oversized
@@ -179,6 +180,59 @@ def sanitize_context(text: str) -> str:
     for pattern in (_INTERNAL_CONTEXT_RE, _INTERNAL_NOTE_RE, _FENCE_TAG_RE):
         text = pattern.sub('', text)
     return text
+
+
+def _scrub(text: str) -> str:
+    """The shared egress scrub. Like chat-platform and cron delivery it holds even when
+    ``security.redact_secrets`` is off (that setting governs local logs, not what leaves the agent)
+    and fails closed."""
+    return redact_for_egress(text)
+
+
+_TOKEN_RE = re.compile(r"[A-Za-z0-9_\-./+]{16,}")
+
+
+def _redact_for_provider(*values: Any) -> Any:
+    """Copies of ``values`` with every string scrubbed before it reaches a memory provider.
+
+    Providers archive whatever they are handed (#115104), so each manager fan-out (turn sync, recall
+    queries, session-end and pre-compress transcripts, memory-tool mirrors, delegation results, provider
+    tool args) goes through ``_scrub``. Walks dicts/lists/tuples so tool-call arguments and multimodal text
+    parts are covered; ``data:`` URLs (inline media) pass through. A value the scrub masked anywhere in the
+    hand-off is then masked everywhere in it, so a key detected in a tool result is also caught where the
+    model repeats it bare in prose. Never mutates the caller's objects: unchanged values come back as-is,
+    changed containers as shallow copies. One value in → one value out; several → a tuple.
+    """
+    learned: set = set()
+
+    def walk(value: Any, fix) -> Any:
+        if isinstance(value, str):
+            return value if not value or value.startswith("data:") else fix(value)
+        if isinstance(value, dict):
+            out = {k: walk(v, fix) for k, v in value.items()}
+            return value if all(out[k] is value[k] for k in value) else out
+        if isinstance(value, (list, tuple)):
+            items = [walk(v, fix) for v in value]
+            if all(new is old for new, old in zip(items, value)):
+                return value
+            return tuple(items) if isinstance(value, tuple) else items
+        return value
+
+    def scrub(text: str) -> str:
+        out = _scrub(text)
+        if out != text:
+            learned.update(set(_TOKEN_RE.findall(text)) - set(_TOKEN_RE.findall(out)))
+        return out
+
+    scrubbed = [walk(v, scrub) for v in values]
+    if learned:
+        pattern = re.compile("|".join(re.escape(t) for t in sorted(learned, key=len, reverse=True)))
+        scrubbed = [walk(v, lambda t: pattern.sub("[redacted]", t) if pattern.search(t) else t) for v in scrubbed]
+    return scrubbed[0] if len(scrubbed) == 1 else tuple(scrubbed)
+
+
+def _redact_messages_for_egress(messages: Optional[List[Any]]) -> Optional[List[Any]]:
+    return None if messages is None else list(_redact_for_provider(messages))
 
 
 class StreamingContextScrubber:
@@ -396,6 +450,7 @@ class MemoryManager:
         clean_query = self._strip_skill_scaffolding(query)
         if not clean_query:
             return ""
+        clean_query = _redact_for_provider(clean_query)
         parts = self._each_provider(
             "prefetch failed (non-fatal)", lambda p: self._prefetch_provider(p, clean_query, session_id=session_id),
         )
@@ -466,6 +521,7 @@ class MemoryManager:
         clean_query = self._strip_skill_scaffolding(query) if providers else None
         if not clean_query:
             return
+        clean_query = _redact_for_provider(clean_query)
         self._submit_background(lambda: self._each_provider(
             "queue_prefetch failed (non-fatal)", lambda p: p.queue_prefetch(clean_query, session_id=session_id),
             providers=providers,
@@ -488,6 +544,9 @@ class MemoryManager:
         clean_user_content = self._strip_skill_scaffolding(user_content) if providers else None
         if not clean_user_content:
             return
+
+        clean_user_content, assistant_content, messages = _redact_for_provider(
+            clean_user_content, assistant_content, messages)
 
         def _sync(provider: MemoryProvider) -> None:
             kwargs: Dict[str, Any] = {"session_id": session_id}
@@ -588,6 +647,7 @@ class MemoryManager:
         provider = self._tool_to_provider.get(tool_name)
         if provider is None:
             return tool_error(f"No memory provider handles tool '{tool_name}'")
+        args = _redact_for_provider(args)
         try:
             return provider.handle_tool_call(tool_name, args, **kwargs)
         except Exception as e:
@@ -595,9 +655,11 @@ class MemoryManager:
             return tool_error(f"Memory tool '{tool_name}' failed: {e}")
 
     def on_turn_start(self, turn_number: int, message: str, **kwargs) -> None:
+        message = _redact_for_provider(message)
         self._each_provider("on_turn_start failed", lambda p: p.on_turn_start(turn_number, message, **kwargs))
 
     def on_session_end(self, messages: List[Dict[str, Any]]) -> None:
+        messages = _redact_messages_for_egress(messages or [])
         self._each_provider("on_session_end failed", lambda p: p.on_session_end(messages), level=logging.WARNING,
                             exc_info=True)
 
@@ -672,6 +734,7 @@ class MemoryManager:
         """
         parts = []
         checkpoint_succeeded = False
+        messages, evidence_messages = _redact_for_provider(messages or [], evidence_messages)
         for provider in self._providers:
             version = self._checkpoint_api_version(provider)
             if version is None:
@@ -710,6 +773,7 @@ class MemoryManager:
     def on_memory_write(self, action: str, target: str, content: str,
                         metadata: Optional[Dict[str, Any]] = None) -> None:
         """Notify external providers when the built-in memory tool writes (skips builtin, the source)."""
+        content, metadata = _redact_for_provider(content, dict(metadata or {}))
 
         def _notify(provider: MemoryProvider) -> None:
             mode = self._provider_memory_write_metadata_mode(provider)
@@ -764,6 +828,7 @@ class MemoryManager:
                 logger.debug("notify_memory_tool_write failed for op %s: %s", action, e)
 
     def on_delegation(self, task: str, result: str, *, child_session_id: str = "", **kwargs) -> None:
+        task, result = _redact_for_provider(task, result)
         self._each_provider(
             "on_delegation failed",
             lambda p: p.on_delegation(task, result, child_session_id=child_session_id, **kwargs),
