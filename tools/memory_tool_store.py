@@ -4,6 +4,7 @@ Module state that tests monkeypatch (``get_memory_dir``, ``fcntl``/``msvcrt``) s
 in ``tools.memory_tool`` and is read lazily."""
 
 import logging
+import re
 import time
 from contextlib import contextmanager, suppress
 from pathlib import Path
@@ -35,9 +36,9 @@ def _error(message: str, **extra) -> Dict[str, Any]:
 def _drift_error(path: Path, bak_path: str) -> Dict[str, Any]:
     """External drift: the file wouldn't round-trip, so flushing would discard content."""
     return _error((
-        f"Refusing to write {path.name}: file on disk has content that wouldn't round-trip "
-        f"through the memory tool (likely added by the patch tool, a shell append, a manual edit, "
-        f"or a concurrent session). A snapshot was saved to {bak_path}. Resolve the drift first — "
+        f"Refusing to write {path.name}: it holds an entry larger than the whole store's char limit, "
+        f"i.e. free-form text written without § delimiters (the patch tool, a shell append, a manual "
+        f"edit). Rewriting it would lose that text. A snapshot was saved to {bak_path}. Resolve the drift first — "
         f"either rewrite the file as a clean §-delimited list of entries, or move the extra "
         f"content out — then retry. This guard exists to prevent silent data loss (issue #26045)."
     ), drift_backup=bak_path, remediation=(
@@ -61,6 +62,28 @@ def _find_unique_match(entries: List[str], old_text: str) -> Tuple[Optional[int]
     if len({entries[i] for i in matches}) > 1:
         return None, True
     return (matches[0] if matches else None), False
+
+
+def _no_match_error(entries: List[str], old_text: str, verb: str, **extra) -> Dict[str, Any]:
+    """Zero-match error that names the fix: the entries sharing the most words with
+    *old_text* (a paraphrased or stale old_text usually still shares most of them), and a
+    pointer when old_text spans several entries joined by the delimiter."""
+    def _words(text: str) -> set:
+        return set(re.findall(r"\w+", text.lower()))
+    words = _words(old_text)
+    scored = sorted(((len(words & _words(e)) / len(words), i) for i, e in enumerate(entries)) if words else [],
+                    key=lambda p: (-p[0], p[1]))
+    closest = [entries[i] for score, i in scored[:3] if score >= 0.3]
+    hint = (" old_text must come from ONE entry ('§' separates entries); use one op per entry."
+            if "§" in old_text else "")
+    return _error(f"No entry matched '{old_text}'.{hint} Retry the {verb} with old_text copied verbatim "
+                  f"from the intended entry" + (" (closest_entries below)." if closest else "."),
+                  **({"closest_entries": closest} if closest else {}), **extra)
+
+
+def _over_limit(new_total: int, limit: int) -> str:
+    return f"would put memory at {new_total:,}/{limit:,} chars: free at least {new_total - limit:,} chars"
+
 
 
 class MemoryStore:
@@ -223,11 +246,12 @@ class MemoryStore:
             if content in entries:
                 return self._success_response(target, "Entry already exists (no duplicate added).")
             if len(ENTRY_DELIMITER.join(entries + [content])) > limit:
+                new_total = len(ENTRY_DELIMITER.join(entries + [content]))
                 return self._failure_with_entries(target, (
-                    f"Memory at {self._char_count(target):,}/{limit:,} chars. Adding this entry "
-                    f"({len(content)} chars) would exceed the limit. Consolidate now: use 'replace' to merge "
-                    f"overlapping entries into shorter ones or 'remove' stale or less important entries (see "
-                    f"current_entries below), then retry this add — all in this turn."))
+                    f"Memory at {self._char_count(target):,}/{limit:,} chars; adding this entry ({len(content)} chars) "
+                    f"would exceed the limit by {new_total - limit:,} chars. Retry as ONE 'operations' batch that "
+                    f"removes or shortens (replace) stale entries from current_entries below to free at least "
+                    f"{new_total - limit:,} chars AND adds this entry — the limit is checked only on the batch result."))
             return entries + [content], "Entry added."
         # Append-only: skip the drift guard (appending never clobbers foreign
         # content) but still refuse a failed read — add rewrites the WHOLE file.
@@ -258,16 +282,15 @@ class MemoryStore:
                 return _error(f"Multiple entries matched '{old_text}'. Be more specific.",
                               matches=[e[:80] + ("..." if len(e) > 80 else "") for e in entries if old_text in e])
             if idx is None:
-                return self._consolidation_failure(_error(
-                    f"No entry matched '{old_text}'. Check current_entries below and retry with the exact text "
-                    f"of the entry you want to {'replace' if new_content else 'remove'}.", current_entries=entries))
+                return self._consolidation_failure(_no_match_error(
+                    entries, old_text, 'replace' if new_content else 'remove', current_entries=entries))
             replaced = entries[:idx] + ([] if new_content is None else [new_content]) + entries[idx + 1:]
             if new_content is None:
                 return replaced, "Entry removed."
             new_total = len(ENTRY_DELIMITER.join(replaced))
             if new_total > limit:
                 return self._failure_with_entries(target, (
-                    f"Replacement would put memory at {new_total:,}/{limit:,} chars. Shorten the new content, "
+                    f"Replacement {_over_limit(new_total, limit)}. Shorten the new content, "
                     f"or 'remove' other stale or less important entries to make room (see current_entries "
                     f"below), then retry — all in this turn."))
             return replaced, "Entry replaced."
@@ -316,7 +339,10 @@ class MemoryStore:
                 msg = self._apply_batch_op(working, act, (op.get("content") or op.get("new_text") or "").strip(),
                                            (op.get("old_text") or "").strip(), f"Operation {i + 1} ({act or 'unknown'})")
                 if msg:
-                    return self._failure_with_entries(target, msg + " No operations were applied (batch is all-or-nothing).")
+                    miss = _no_match_error(working, (op.get("old_text") or "").strip(), act)
+                    return self._consolidation_failure(_error(
+                        msg + " No operations were applied (batch is all-or-nothing).",
+                        **({"closest_entries": miss["closest_entries"]} if "no entry matched" in msg and miss.get("closest_entries") else {})))
             if entries and not working:
                 # #103419: a consolidation batch that removes the last entry would
                 # commit an empty file as a normal successful write. Refuse; single
@@ -332,7 +358,7 @@ class MemoryStore:
             if new_total > limit:
                 return self._failure_with_entries(target, (
                     f"After applying all {len(operations)} operations, memory would be at "
-                    f"{new_total:,}/{limit:,} chars -- over the limit. Remove or shorten more "
+                    f"{new_total:,}/{limit:,} chars -- free at least {new_total - limit:,} chars. Remove or shorten more "
                     f"entries in the same batch (see current_entries below), then retry."))
             return working, f"Applied {len(operations)} operation(s)."
         return self._mutate(target, _apply)
@@ -401,12 +427,13 @@ class MemoryStore:
             raise RuntimeError(f"Failed to write memory file {path}: {e}")
 
     def _detect_external_drift(self, target: str, raw: str) -> Optional[str]:
-        """``.bak.<ts>`` snapshot path if *raw* shows external drift, else None. Signals:
-        round-trip mismatch, or one entry over the whole-file limit (no tool-written
-        entry can be — an external writer appended free-form text)."""
-        parsed = self._parse_entries(raw)
-        if not raw.strip() or (raw.strip() == ENTRY_DELIMITER.join(parsed)
-                               and max(map(len, parsed), default=0) <= self._char_limit(target)):
+        """``.bak.<ts>`` snapshot path if *raw* shows external drift, else None. The one
+        signal is an entry over the whole-file limit: no tool-written entry can be, so it is
+        free-form text appended without delimiters, and replacing that "entry" would discard
+        it. Layout differences (blank lines around ``§``, empty entries, padding) are NOT
+        drift: parsing only strips whitespace, so the flush loses nothing but whitespace, and
+        refusing there blocked every replace/remove on a hand-formatted file for good (#107270)."""
+        if max(map(len, self._parse_entries(raw)), default=0) <= self._char_limit(target):
             return None
         path = self._path_for(target)
         bak_path = path.with_suffix(path.suffix + f".bak.{int(time.time())}")
