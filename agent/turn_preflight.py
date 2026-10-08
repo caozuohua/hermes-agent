@@ -143,8 +143,7 @@ def run_preflight_compression(
         _pre_api_input = v.messages
         v.messages, v.active_system_prompt = agent._compress_context(
             v.messages, system_message, approx_tokens=request_pressure_tokens,
-            task_id=effective_task_id,
-        )
+            task_id=effective_task_id, trigger="turn_start")
         if context_compression_timed_out(agent):
             # Progress-aware timeout: never reached the provider — refund the
             # call/budget and stop; an overflow retry would only re-compress.
@@ -302,8 +301,7 @@ def compress_after_tool_results(
         # Pass overhead-aware _real_tokens, not last_prompt_tokens (0 in the
         # no-usage fallback), so the overflow guard sees the true size.
         messages, active_system_prompt = agent._compress_context(
-            messages, system_message, approx_tokens=_real_tokens, task_id=effective_task_id
-        )
+            messages, system_message, approx_tokens=_real_tokens, task_id=effective_task_id, trigger="engine_preflight")
         if messages is _post_tool_input and compression_skipped_due_to_lock(agent):
             # Lock-skip no-op is a temporary defer, not evidence about compressibility:
             # refund so a lock-loser loop doesn't burn the budget toward exhausted.

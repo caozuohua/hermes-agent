@@ -1167,8 +1167,7 @@ class GatewayTurnMixin:
                 # lossy truncation (#100849 bundle).
                 copy_context().run,
                 lambda: _hyg_agent._compress_context(
-                    _hyg_msgs, "", approx_tokens=plan.approx_tokens, commit_fence=_hyg_commit_fence,
-                ),
+                    _hyg_msgs, "", approx_tokens=plan.approx_tokens, commit_fence=_hyg_commit_fence, trigger="gateway_hygiene"),
             )
             attempt.wait_started = time.monotonic()
             try:

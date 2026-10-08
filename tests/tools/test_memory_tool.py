@@ -211,7 +211,7 @@ class TestMemoryConsolidationGracefulDegrade:
             r = store.replace("memory", "nonexistent", "new")
             assert r["success"] is False
             assert "current_entries" in r  # actionable feedback, keep trying
-            assert "retry with the exact text" in r["error"]
+            assert "old_text" in r["error"]
         # The next failure degrades: terminal, no retry instruction.
         r = store.replace("memory", "nonexistent", "new")
         assert r["success"] is False
@@ -230,7 +230,7 @@ class TestMemoryConsolidationGracefulDegrade:
         for _ in range(cap):
             r = store.apply_batch("memory", bad_batch)
             assert r["success"] is False
-            assert "current_entries" in r  # still actionable under cap
+            assert "No operations were applied" in r["error"]  # retry must not imply a partial write
         r = store.apply_batch("memory", bad_batch)
         assert r["success"] is False
         assert r["done"] is True

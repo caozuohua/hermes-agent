@@ -3484,7 +3484,7 @@ class _Attempt:
         )
 
 
-def _begin_compression_attempt(agent: Any, *, force: bool, defer_notification: bool) -> _Attempt:
+def _begin_compression_attempt(agent: Any, *, force: bool, defer_notification: bool, trigger: str | None = None) -> _Attempt:
     """Snapshot + claim the compressor, reset per-attempt agent signals, seed telemetry.
     The claim stops a late-unwinding sibling (stall-fallback overlap) from restoring its snapshot over ours or
     clearing our cancellation consult. Signals are cleared at the VERY TOP, before codex/breaker
@@ -3512,7 +3512,7 @@ def _begin_compression_attempt(agent: Any, *, force: bool, defer_notification: b
         agent._compression_attempt_id = attempt_id
         agent.context_compressor._compression_telemetry_seed = {
             "attempt_id": attempt_id, "session_id": agent.session_id or "",
-            "trigger_source": "manual" if force else "auto",
+            "trigger_source": trigger or ("manual" if force else "auto"),
         }
     return _Attempt(snapshot, generation, started_at)
 
@@ -3558,6 +3558,7 @@ def compress_context(
     task_id: str = "default", focus_topic: Optional[str] = None, force: bool = False,
     bypass_cooldown: bool = False, defer_context_engine_notification: bool = False,
     commit_fence: Optional[CompressionCommitFence] = None,
+    trigger: str | None = None,
 ) -> Tuple[list, str]:
     """Compress conversation context and split the session in SQLite.
     ``force`` (manual /compress) clears the summary-failure cooldown; ``bypass_cooldown`` (provider-proven
@@ -3580,7 +3581,7 @@ def compress_context(
     cooperative fence for executor callers that may time out. It prevents a late worker from mutating
     session state after its caller has moved on.
     """
-    attempt = _begin_compression_attempt(agent, force=force, defer_notification=defer_context_engine_notification)
+    attempt = _begin_compression_attempt(agent, force=force, defer_notification=defer_context_engine_notification, trigger=trigger)
 
     # Codex owns the real thread; route compaction to its own compact (config
     # compression.codex_app_server_auto). Memory handoff is Hermes-only: no native

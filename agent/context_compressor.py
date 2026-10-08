@@ -4527,8 +4527,34 @@ Write only the summary body. Do not include any preamble or prefix."""
         # Rewritten content: drop the stale api_content sidecar so replay can't resend pre-merge bytes.
         drop_stale_api_content(msg)
 
+    def _compression_method(self) -> str:
+        """How the summary that replaced the middle window was produced."""
+        if getattr(self, "_last_summary_fallback_used", False):
+            return "deterministic_fallback"
+        if getattr(self, "_last_aux_model_failure_error", None):
+            return "aux_fallback_main"
+        return "llm_summary"
+
+    def _record_compression_effect(
+        self, messages_before: int, compressed: list[dict[str, Any]], tokens_before: int, tool_results_pruned: int,
+        reasoning_items_pruned: int,
+    ) -> None:
+        """Record what a finished rewrite did. ``tokens_before`` and the after count are rough message-only
+        estimates (system prompt and tool schemas excluded), so they compare like for like."""
+        telemetry = getattr(self, "_active_compression_telemetry", None)
+        if not isinstance(telemetry, dict):
+            return
+        tokens_after = estimate_messages_tokens_rough(compressed)
+        telemetry.update(
+            method=self._compression_method(), items_dropped=getattr(self, "_last_summary_dropped_count", 0) or 0,
+            messages_before=messages_before, messages_after=len(compressed), tokens_before=tokens_before,
+            tokens_after=tokens_after, tokens_reclaimed=tokens_before - tokens_after,
+            token_count_method="estimate_rough", tool_results_pruned=tool_results_pruned,
+            reasoning_items_pruned=reasoning_items_pruned,
+        )
+
     def _finalize_compressed(
-        self, compressed: List[Dict[str, Any]], messages: List[Dict[str, Any]], n_messages: int,
+        self, compressed: List[Dict[str, Any]], messages: List[Dict[str, Any]], n_messages: int, pruned_count: int = 0,
     ) -> List[Dict[str, Any]]:
         """Post-assembly cleanup: orphan pairs, media, savings, markers, replay prune, mem trim."""
         # Single-prompt cron shape: the only live instruction sits in the protected head, BEFORE the
@@ -4564,6 +4590,7 @@ Write only the summary body. Do not include any preamble or prefix."""
         _pruned_replay = _prune_stale_reasoning_replay(compressed)
         if _pruned_replay and not self.quiet_mode:
             logger.info("Pruned stale replay items from %d assistant message(s) during compaction", _pruned_replay)
+        self._record_compression_effect(n_messages, compressed, pre_estimate, pruned_count, _pruned_replay)
         self._last_compression_made_progress = True
 
         # Compaction frees the biggest allocation: hand pages back to the OS (glibc/config-gated,
@@ -4672,7 +4699,7 @@ Write only the summary body. Do not include any preamble or prefix."""
             )
         # Phase 4: Assemble compressed message list
         compressed = self._assemble_compressed(messages, compress_start, compress_end, scan, summary)
-        return self._finalize_compressed(compressed, messages, n_messages)
+        return self._finalize_compressed(compressed, messages, n_messages, pruned_count)
 
     def _assemble_compressed(
         self, messages: List[Dict[str, Any]], compress_start: int, compress_end: int, scan: "_HandoffScan", summary: str,
