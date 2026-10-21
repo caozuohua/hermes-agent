@@ -705,6 +705,16 @@ def is_env_dump_command(command: str | None) -> bool:
     return False
 
 
+def redact_for_egress(text: str) -> str:
+    """Fail closed when scrubbing text for a remote memory provider."""
+    try:
+        text = redact_sensitive_text(str(text or ""), force=True)
+        return re.sub(r"\bBearer\s+(?:\[[^\]]+\]|[A-Za-z0-9._~+/-]{20,}=*)",
+                      "Bearer [redacted]", text, flags=re.IGNORECASE)
+    except Exception:
+        return "[redaction-unavailable]"
+
+
 def redact_terminal_output(output: str, command: str | None = None, *, force: bool = False) -> str:
     """Single redaction policy for ALL terminal-output surfaces: the ENV-assignment
     pass runs only when ``command`` is an env dump or reads a ``.env`` file
