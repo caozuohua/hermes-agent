@@ -3,6 +3,12 @@
 Release branch: `codex/lite-refresh-20261021`, based on live
 `8a8833f7d89d523c6f7e43311f31e1e2d9810a65`. No upstream-main merge.
 
+Deployment is now complete at runtime commit `3ef6e1abca6`. See
+[RELEASE-REPORT.md](RELEASE-REPORT.md) for the actual cutover, governance,
+failed semantic acceptance, full-suite limitations and ongoing observation.
+The preparation procedure below is retained for future deployments, not a
+claim that the current release is still awaiting cutover.
+
 ## Provenance
 
 Selective upstream v0.22.2 ports retain the original authors:
