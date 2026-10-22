@@ -1,0 +1,16 @@
+# Merge into the existing profile; credentials and primary model stay in place.
+updates:
+  branch: codex/lite-refresh-20261021
+  require_confirmation: true
+  pre_update_backup: full
+  non_interactive_local_changes: abort
+memory:
+  mem0:
+    durable_writes: true
+    user_facts_only: true
+    max_pending_writes: 100
+    write_timeout_seconds: 30
+    search_timeout_seconds: 8
+    prefetch_wait_seconds: 3
+sessions:
+  retention_days: 45

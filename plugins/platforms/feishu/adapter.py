@@ -1112,6 +1112,8 @@ def _load_lark_oapi() -> bool:
                 module = importlib.import_module(module_name)
                 bound.update({name: getattr(module, name) for name in names})
             bound["FeishuWSClient"] = importlib.import_module("lark_oapi.ws").Client
+            from agent.sdk_log_redaction import protect_sdk_logger
+            protect_sdk_logger(importlib.import_module("lark_oapi.core.log").logger)
         except (ImportError, AttributeError):
             return False
         bound["FEISHU_AVAILABLE"] = True

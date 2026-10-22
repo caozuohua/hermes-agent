@@ -66,11 +66,17 @@ class SelfHostedBackend(Mem0Backend):
     mem0.MemoryClient is hardwired to the cloud API (``Authorization: Token``, ``GET /v1/ping/`` in ``__init__``),
     so this speaks the server's real contract: ``X-API-Key`` auth and the ``/memories`` / ``/search`` routes."""
 
-    def __init__(self, api_key: str, host: str, transport=None):
+    def __init__(self, api_key: str, host: str, transport=None, *, settings=None):
         import httpx
+        self._settings = settings or {}
+        self._journal = None
+        if self._settings.get("durable_writes", False):
+            from hermes_constants import get_hermes_home
+            from ._delivery import DeliveryJournal
+            self._journal = DeliveryJournal(get_hermes_home() / "mem0-delivery.db", int(self._settings.get("max_pending_writes", 100)))
         headers = {"Content-Type": "application/json", **({"X-API-Key": api_key} if api_key else {})}  # key omitted only for AUTH_DISABLED servers
-        # Connect-level retries keep one dropped SYN from counting toward the breaker. ``transport`` is injectable for tests.
-        self._client = httpx.Client(base_url=host.rstrip("/"), headers=headers, timeout=30.0, transport=transport or httpx.HTTPTransport(retries=2))
+        # No transport retries: a write's ambiguous outcome must be reconciled first.
+        self._client = httpx.Client(base_url=host.rstrip("/"), headers=headers, timeout=httpx.Timeout(float(self._settings.get("write_timeout_seconds", 30)), connect=5), transport=transport or httpx.HTTPTransport(retries=0))
 
     def _json(self, method: str, path: str, **kwargs) -> Any:
         resp = self._client.request(method, path, **kwargs)
@@ -79,10 +85,86 @@ class SelfHostedBackend(Mem0Backend):
 
     def search(self, query: str, *, filters: dict, top_k: int = 10, rerank: bool = False) -> list[dict]:
         # rerank is platform-only; the self-hosted /search ignores it. user_id belongs in filters (top-level is deprecated).
-        return _unwrap_results(self._json("POST", "/search", json={"query": query, "top_k": top_k, **({"filters": filters} if filters else {})}))
+        return _unwrap_results(self._json("POST", "/search", timeout=float(self._settings.get("search_timeout_seconds", 10)), json={"query": query, "top_k": top_k, "show_expired": False, **({"filters": filters} if filters else {})}))
 
     def add(self, messages: list, *, user_id: str, agent_id: str, infer: bool = False, metadata: dict | None = None) -> dict:
-        return self._json("POST", "/memories", json={"messages": messages, **_add_kwargs(user_id, agent_id, infer, metadata)})
+        payload = {"messages": messages, **_add_kwargs(user_id, agent_id, infer, metadata)}
+        if self._journal is None:
+            return self._json("POST", "/memories", json=payload)
+        request_id = self._journal.stage(payload)
+        previous = self._journal.status(request_id)
+        if previous['delivery_status'] == 'confirmed' and not infer:
+            receipts = previous.get('results', [])
+            current = [self._json('GET', f"/memories/{r['id']}") for r in receipts if r.get('id')]
+            if not current or any(not r or r.get('memory') != messages[0]['content'] for r in current):
+                self._journal.supersede(request_id)
+                request_id = self._journal.stage(payload)
+        self.drain_pending()
+        return self._journal.status(request_id)
+
+    def stage_add(self, messages, *, user_id, agent_id, infer=True, metadata=None):
+        return self._journal.stage({"messages": messages, **_add_kwargs(user_id, agent_id, infer, metadata)})
+
+    def drain_pending(self, should_stop=lambda: False):
+        if self._journal:
+            self._journal.drain(self._send_write, should_stop)
+
+    def _send_write(self, payload):
+        operation = payload.get('operation')
+        if not operation:
+            return self._json('POST', '/memories', json=payload)
+        path = f"/memories/{payload['memory_id']}"
+        if operation == 'update':
+            self._json('PUT', path, json={'text': payload['text']})
+        else:
+            self._json('DELETE', path)
+        receipt = self._check_mutation(payload)
+        if receipt is None:
+            raise ValueError('Mutation read-back did not confirm the requested state')
+        return receipt
+
+    def _check_mutation(self, payload):
+        import httpx
+        try:
+            current = self._json('GET', f"/memories/{payload['memory_id']}")
+        except httpx.HTTPStatusError as exc:
+            if exc.response.status_code != 404:
+                raise
+            current = None
+        matches = (not current) if payload['operation'] == 'delete' else (
+            current and current.get('memory') == payload['text'])
+        if matches:
+            return {'results': [{'id': payload['memory_id']}], 'result': 'Requested state verified by read-back.'}
+        return None
+
+    def _mutate(self, operation, memory_id, text=None):
+        payload = {'operation': operation, 'memory_id': memory_id}
+        if text is not None:
+            payload['text'] = text
+        request_id = self._journal.stage(payload)
+        if self._journal.status(request_id)['delivery_status'] == 'confirmed' and self._check_mutation(payload) is None:
+            self._journal.supersede(request_id)
+            request_id = self._journal.stage(payload)
+        self.drain_pending()
+        result = self._journal.status(request_id)
+        if result['delivery_status'] != 'confirmed':
+            result['result'] = 'Mutation pending confirmation. Do not claim completion or resubmit.'
+        return result
+
+    def update(self, memory_id, text):
+        return self._mutate('update', memory_id, text) if self._journal else super().update(memory_id, text)
+
+    def delete(self, memory_id):
+        return self._mutate('delete', memory_id) if self._journal else super().delete(memory_id)
+
+    def reconcile_pending(self):
+        if self._journal:
+            self._journal.reconcile(lambda user: _unwrap_results(self._json(
+                "GET", "/memories", params={"user_id": user, "top_k": 1000, "show_expired": "true"})), self._check_mutation)
+
+    def update_metadata(self, memory_id, *, metadata=None, expiration_date=None):
+        return self._json("PUT", f"/memories/{memory_id}", json={
+            "metadata": metadata or {}, "expiration_date": expiration_date})
 
     def _update(self, memory_id: str, text: str) -> None:
         self._json("PUT", f"/memories/{memory_id}", json={"text": text})

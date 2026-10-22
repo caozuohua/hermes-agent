@@ -138,7 +138,8 @@ class TestMem0V3Internal:
         backend = FakeBackend()
         provider = self._make_provider(monkeypatch, backend)
         provider.sync_turn("user said", "assistant replied", session_id="s1")
-        provider._sync_thread.join(timeout=2)
+        if provider._sync_thread:
+            provider._sync_thread.join(timeout=2)
         assert len(backend.captured) == 1
         call = backend.captured[0]
         assert call[2]["user_id"] == "u123"
@@ -371,7 +372,7 @@ class TestCreateBackendRouting:
         captured = {}
 
         class SH(_SentinelBackend):
-            def __init__(self, api_key, host):
+            def __init__(self, api_key, host, *, settings=None):
                 captured["args"] = (api_key, host)
 
         monkeypatch.setattr("plugins.memory.mem0._backend.SelfHostedBackend", SH)

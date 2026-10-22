@@ -3250,10 +3250,6 @@ def _commit_compaction(
     if agent._session_db:
         split_status = "pending"
         try:
-            # Memory extraction runs in BOTH modes: pre-compaction turns are summarized
-            # away whether or not the id rotates.
-            agent.commit_memory_session(messages)
-
             # Pop _compaction_tail tags before the size estimate / rotation: they must not
             # inflate anti-growth or reach the provider. Track ids: salvage may subset list.
             _tail_tagged_ids = {id(m) for m in compressed if isinstance(m, dict) and m.pop("_compaction_tail", None)}
@@ -3266,7 +3262,8 @@ def _commit_compaction(
                     compressed=messages, refused_prompt=_refused_sp, commit_started_at=commit_started_at
                 )
             with _hold_attempt_telemetry(agent.context_compressor):
-                agent.commit_memory_session(original_messages)
+                agent.commit_memory_session(
+                    copy.deepcopy(messages_before_compression if messages_before_compression is not None else messages))
             if in_place:
                 # In-place compaction: same session_id; soft-archive old turns (active=0, still
                 # searchable) + insert `compressed` atomically; no pre-flush (tail already in).

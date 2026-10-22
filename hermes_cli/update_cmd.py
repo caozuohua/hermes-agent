@@ -861,6 +861,13 @@ def _prepare_checkout_for_update(
     """Parked-branch guard, land on the target, stash, count new commits. Exits when the
     checkout is unsafe to move or the target is missing. ``commit_count`` is 0 when up to
     date, -1 when tips differ but the shallow count is unrecoverable."""
+    if gateway_mode or assume_yes or not (sys.stdin.isatty() and sys.stdout.isatty()):
+        if str(_updates_config().get("non_interactive_local_changes", "stash")).lower() == "abort":
+            dirty = _git_run(git_cmd, ["status", "--porcelain", "--untracked-files=normal"])
+            if dirty.returncode or dirty.stdout.strip():
+                print("Update stopped: local changes or unverifiable checkout; no automatic stash performed.")
+                _m()._resume_windows_gateways_after_update(_windows_gateway_resume)
+                sys.exit(1)
     parked_branch_switched, in_place_update, switch_block_reason = _apply_parked_branch_guard(
         git_cmd, branch, current_branch, switch_branch=switch_branch,
         _windows_gateway_resume=_windows_gateway_resume)

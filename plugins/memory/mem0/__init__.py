@@ -58,6 +58,15 @@ def _load_config() -> dict:
         config["user_id"] = os.environ["MEM0_USER_ID"]
     file_cfg = _read_mem0_json(get_hermes_home() / "mem0.json")
     config.update({k: v for k, v in file_cfg.items() if v is not None and v != ""})
+    # Behavioral overrides belong in the profile config, never in secret env files.
+    # Older profiles keep mem0.json; config.yaml is the final behavioral override.
+    try:
+        import yaml
+        cfg = yaml.safe_load((get_hermes_home() / "config.yaml").read_text(encoding="utf-8")) or {}
+        overrides = (cfg.get("memory") or {}).get("mem0") or {}
+        config.update({k: v for k, v in overrides.items() if k != "api_key"})
+    except FileNotFoundError:
+        pass
     return config
 
 
@@ -133,14 +142,15 @@ class Mem0MemoryProvider(MemoryProvider):
     def _create_backend(self):
         # Lazy-install the mem0 SDK before the backend imports it (honors security.allow_lazy_installs);
         # on failure the backend import raises the canonical error, captured below.
-        with suppress(Exception):
-            from tools.lazy_deps import ensure as _lazy_ensure
-            _lazy_ensure("memory.mem0", prompt=False)
+        if self._mode == "oss" or not self._host:
+            with suppress(Exception):
+                from tools.lazy_deps import ensure as _lazy_ensure
+                _lazy_ensure("memory.mem0", prompt=False)
         try:
             from . import _backend
             if self._mode == "oss":
                 return _backend.OSSBackend(self._config.get("oss", {}))
-            return _backend.SelfHostedBackend(self._api_key, self._host) if self._host else _backend.PlatformBackend(self._api_key)
+            return _backend.SelfHostedBackend(self._api_key, self._host, settings=self._config) if self._host else _backend.PlatformBackend(self._api_key)
         except Exception as e:
             logger.error("Mem0 backend failed to initialize (%s mode): %s", self._mode, e)
             self._init_error = str(e)
@@ -186,6 +196,7 @@ class Mem0MemoryProvider(MemoryProvider):
         return result
 
     def initialize(self, session_id: str, **kwargs) -> None:
+        self._session_id = session_id
         self._config = cfg = _load_config()
         self._mode, self._api_key, self._host, self._agent_id = cfg.get("mode", "platform"), cfg.get("api_key", ""), cfg.get("host", ""), cfg.get("agent_id", "hermes")
         # user_id precedence: operator-configured (env/mem0.json) > gateway-native id (kwargs) > _DEFAULT_USER_ID.
@@ -197,6 +208,9 @@ class Mem0MemoryProvider(MemoryProvider):
         self._rerank_default = _rr.lower() in ("true", "1", "yes") if isinstance(_rr, str) else bool(_rr)
         self._channel = kwargs.get("platform") or "cli"
         self._backend = self._create_backend()
+        self._closing = False
+        if self._backend and getattr(self._backend, "_journal", None) is not None:
+            self._start_durable_sync(self._backend)
         if self._backend and not self._atexit_registered:
             atexit.register(self._shutdown_backend)
             self._atexit_registered = True
@@ -229,7 +243,7 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def _start_prefetch(self, query: str) -> None:
         backend = self._backend
-        if not query or backend is None or self._is_breaker_open():
+        if not query or backend is None or getattr(self, '_closing', False) or self._is_breaker_open():
             return
 
         def _run():
@@ -239,10 +253,11 @@ class Mem0MemoryProvider(MemoryProvider):
             with self._prefetch_lock:
                 if self._prefetch_query == query:
                     self._prefetch_result, self._prefetch_done = body, True
+            self._close_after_worker()
 
         with self._prefetch_lock:
             # Same query already answered or still in flight: don't restart it.
-            if self._prefetch_query == query and (self._prefetch_done or (self._prefetch_thread and self._prefetch_thread.is_alive())):
+            if (self._prefetch_thread and self._prefetch_thread.is_alive()) or (self._prefetch_query == query and self._prefetch_done):
                 return
             self._prefetch_query, self._prefetch_result, self._prefetch_done = query, "", False
             self._prefetch_thread = t = threading.Thread(target=_run, daemon=True, name="mem0-prefetch")
@@ -256,26 +271,41 @@ class Mem0MemoryProvider(MemoryProvider):
         with self._prefetch_lock:
             thread = self._prefetch_thread if self._prefetch_query == query else None
         if thread:
-            thread.join(timeout=_PREFETCH_WAIT_SECS)
+            thread.join(timeout=float((self._config or {}).get("prefetch_wait_seconds", _PREFETCH_WAIT_SECS)))
         return self._consume_prefetch_result(query) or ""  # slow backend: skip injection; mem0_search remains the backstop
 
     def sync_turn(self, user_content: str, assistant_content: str, *, session_id: str = "") -> None:
-        """Send the turn to Mem0 for server-side fact extraction (non-blocking)."""
-        if self._backend is None or self._is_breaker_open():
+        """Persist accepted work before dispatch; never drop a turn because a worker is busy."""
+        backend = self._backend
+        if backend is None:
+            logger.warning("Mem0 sync not submitted: backend unavailable; source remains in session history")
             return
+        messages = [{"role": "user", "content": user_content}]
+        if not (self._config or {}).get("user_facts_only", False):
+            messages.append({"role": "assistant", "content": assistant_content})
+        if getattr(backend, "_journal", None) is not None:
+            backend.stage_add(messages, user_id=self._user_id, agent_id=self._agent_id, metadata={
+                "channel": self._channel, "source_session": session_id or getattr(self, "_session_id", ""),
+                "source": "user_turn", "confirmation": "extracted"})
+            if self._is_breaker_open():
+                return
+            self._start_durable_sync(backend)
+        else:
+            # The manager already serializes sync_turn on its background executor.
+            self._try(lambda: self._add(messages, infer=True), logger.warning, "Mem0 sync failed: %s")
 
-        def _sync():
-            if self._backend is not None:
-                messages = [{"role": "user", "content": user_content}, {"role": "assistant", "content": assistant_content}]
-                self._try(lambda: self._add(messages, infer=True), logger.warning, "Mem0 sync failed: %s")
-
+    def _start_durable_sync(self, backend):
         with self._sync_lock:
-            prev = self._sync_thread
-            if prev and prev.is_alive():
-                prev.join(timeout=5.0)
-                if prev.is_alive():  # still busy after the wait: skip to avoid duplicate ingestion
-                    return
-            self._sync_thread = threading.Thread(target=_sync, daemon=True, name="mem0-sync")
+            if getattr(self, '_closing', False) or (self._sync_thread and self._sync_thread.is_alive()):
+                return
+            def run():
+                try:
+                    self._try(lambda: backend.drain_pending(lambda: self._closing), logger.warning, "Mem0 pending dispatch failed: %s")
+                    if not self._closing:
+                        self._try(backend.reconcile_pending, logger.warning, "Mem0 confirmation check failed: %s")
+                finally:
+                    self._close_after_worker()
+            self._sync_thread = threading.Thread(target=run, daemon=True, name="mem0-sync")
             self._sync_thread.start()
 
     def get_tool_schemas(self) -> List[Dict[str, Any]]:
@@ -297,6 +327,10 @@ class Mem0MemoryProvider(MemoryProvider):
 
     def _tool_add(self, args: dict) -> str:
         result = self._add([{"role": "user", "content": args["content"]}], infer=False)
+        if isinstance(result, dict) and result.get("delivery_status"):
+            if result["delivery_status"] != "confirmed":
+                return json.dumps({**result, "result": "Storage pending confirmation. Do not claim saved or resend."})
+            return json.dumps({**result, "result": "Fact stored." if result.get("results") else "Request completed; no new memory returned."})
         event_id = result.get("event_id") if isinstance(result, dict) else None
         # Cloud add is async (server-side extraction); OSS and self-hosted store synchronously.
         msg = "Fact stored." if (self._mode == "oss" or self._host) else "Fact queued for storage."
@@ -329,8 +363,18 @@ class Mem0MemoryProvider(MemoryProvider):
             if not client or on_client_error == "count":
                 self._record_failure()
             return tool_error(self._format_error(label, e))
-        self._record_success()
+        if json.loads(result).get('delivery_status') in {'unknown', 'observed'}:
+            self._record_failure()
+        else:
+            self._record_success()
         return result
+
+    def _close_after_worker(self):
+        if getattr(self, '_closing', False) and not any(
+            t and t is not threading.current_thread() and t.is_alive()
+            for t in (self._prefetch_thread, self._sync_thread)
+        ):
+            self._shutdown_backend()
 
     def _shutdown_backend(self):
         with suppress(Exception):
@@ -339,10 +383,12 @@ class Mem0MemoryProvider(MemoryProvider):
                 self._backend = None
 
     def shutdown(self) -> None:
+        self._closing = True
         for t in (self._prefetch_thread, self._sync_thread):
             if t and t.is_alive():
                 t.join(timeout=5.0)
-        self._shutdown_backend()
+        if not any(t and t.is_alive() for t in (self._prefetch_thread, self._sync_thread)):
+            self._shutdown_backend()
 
 
 def register(ctx) -> None:
