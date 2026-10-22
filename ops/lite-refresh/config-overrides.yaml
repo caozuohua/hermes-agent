@@ -13,4 +13,6 @@ memory:
     search_timeout_seconds: 8
     prefetch_wait_seconds: 3
 sessions:
+  # The daily systemd maintenance job owns pruning under the shared maintenance lock.
+  auto_prune: false
   retention_days: 45
