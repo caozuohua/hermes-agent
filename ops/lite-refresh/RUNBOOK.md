@@ -6,6 +6,8 @@ Release branch: `codex/lite-refresh-20261021`, based on live
 Deployment is now complete at runtime commit `3ef6e1abca6`. See
 [RELEASE-REPORT.md](RELEASE-REPORT.md) for the actual cutover, governance,
 failed semantic acceptance, full-suite limitations and ongoing observation.
+The completed 72-hour checkpoint is recorded in [STAGE-72H.md](STAGE-72H.md):
+the fixed recall set passed that rerun, while overall acceptance remains open.
 The preparation procedure below is retained for future deployments, not a
 claim that the current release is still awaiting cutover.
 
@@ -114,6 +116,13 @@ Reuse the existing five-minute monitoring cadence. Record timestamp, process
 start, service memory/RSS, thread count, restart count, OOM events and connection
 state without request content or credentials. After warmup, require comparable
 load, memory growth <=10%, service P95 <450 MiB and no sustained thread growth.
+The runtime sampler is an `ExecStopPost` command in the existing monitor service's
+`/etc/systemd/system/vps-ops-monitor-gcp.service.d/lite-refresh.conf`. It must run
+after both successful and failed monitor executions; `ExecStartPost` skips failed
+starts and previously caused gaps. Validate with isolated oneshot units returning
+both zero and nonzero, each producing exactly one sample. Keep the main monitor's
+failure status visible. The timer retains its existing jitter; missing samples
+remain missing, and journal connection events must supplement sampled states.
 72 hours and seven days require actual elapsed observations; never mark them
 passed during deployment. Keep daily reboot disabled only while monitoring and
 controlled-restart recovery are verified. Escalate meaningful failures, not each
